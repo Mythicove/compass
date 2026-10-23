@@ -1,27 +1,28 @@
 # Mythic Compass
 
-定制 Minecraft 启动器，服务 Mythicove 混合站（统一鉴权 + 皮肤 + mod/整合包分发）。定位私群场景（学校 MC 群等），非公开市场。
+Minecraft 启动器原型（Tauri 2 + React），接入 Mythicove 生态：Yggdrasil 登录、skinview3d 皮肤预览、从 `mythic-hoard` 浏览并下载 mod/整合包（`.mrpack`）。定位私群/小社区场景，不是公共市场竞争者。
 
-## 功能规划
+## 现状（原型）
 
-- **统一鉴权**：Yggdrasil 外置登录（对接 `mythic-mirror`），正版兼容。
-- **皮肤预览**：`skinview3d` 3D 实时预览。
-- **mod / 整合包**：从 `mythic-hoard` 拉取，`.mrpack` 导入（packwiz 兼容）。
-- **一键启动**：配置 Java、游戏版本、loader（Fabric/Forge/NeoForge/Quilt），一键启动 Minecraft。
+已实现：
 
-## 技术栈
+- Yggdrasil 账号密码登录（对接 `mythic-mirror`），会话持久化
+- skinview3d 3D 皮肤预览
+- 从 `mythic-hoard` 拉取项目/版本列表，下载 `.mrpack`
+- 委托外部启动器（默认 Prism Launcher）`--import` 接管实际启动
 
-- Tauri 2 + React + TypeScript + Vite
-- `skinview3d`（3D）、`openapi-typescript`（对接后端契约）
+**未实现（与"启动器"之名的差距）**：原生 Minecraft 启动（Java 检测、piston-meta 版本清单、asset 下载、authlib-injector 注入、实例管理）、下载进度/校验、i18n、自动更新。当前是单页原型，详见 `docs/plans/status.md`。
 
-## 开发
+## 运行
 
 ```bash
 pnpm install
-pnpm tauri dev      # 桌面开发
+pnpm tauri dev      # 开发
 pnpm tauri build    # 打包
 ```
 
-## 状态
+API 地址默认 `http://localhost:8080`（统一 API 域名），可在界面/`localStorage` 覆盖。
 
-骨架阶段，核心逻辑待实现。
+## 许可证
+
+[AGPL-3.0](./LICENSE)
