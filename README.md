@@ -25,4 +25,4 @@ API 地址默认 `http://localhost:8080`（统一 API 域名），可在界面/`
 
 ## 许可证
 
-[AGPL-3.0](./LICENSE)
+[Elastic License 2.0 (ELv2)](./LICENSE)
