@@ -21,7 +21,7 @@
 use std::collections::HashMap;
 
 use regex::Regex;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// 版本 JSON 里 `features` 规则的求值上下文（`is_demo_user`、`has_custom_resolution`、
 /// `has_quick_plays_support` 等）。用 map 而不是结构体：Mojang 会新增特性名，
@@ -122,14 +122,14 @@ impl OsInfo {
 // 规则
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RuleAction {
     Allow,
     Disallow,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OsRule {
     #[serde(default)]
     pub name: Option<String>,
@@ -140,7 +140,7 @@ pub struct OsRule {
     pub arch: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Rule {
     pub action: RuleAction,
     #[serde(default)]
@@ -203,7 +203,7 @@ pub fn rules_allow(rules: Option<&[Rule]>, os: &OsInfo, features: &Features) -> 
 // 版本 JSON
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Download {
     #[serde(default)]
     pub path: Option<String>,
@@ -214,7 +214,7 @@ pub struct Download {
     pub size: u64,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LibraryDownloads {
     #[serde(default)]
     pub artifact: Option<Download>,
@@ -222,13 +222,13 @@ pub struct LibraryDownloads {
     pub classifiers: Option<HashMap<String, Download>>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Extract {
     #[serde(default)]
     pub exclude: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Library {
     /// Maven 坐标，3 段或 4 段（第 4 段是 classifier）。
     pub name: String,
@@ -250,7 +250,7 @@ pub struct Library {
     pub extract: Option<Extract>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ArgValue {
     One(String),
@@ -266,7 +266,7 @@ impl ArgValue {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ArgItem {
     Plain(String),
@@ -277,7 +277,7 @@ pub enum ArgItem {
     },
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Arguments {
     #[serde(default)]
     pub game: Vec<ArgItem>,
@@ -285,7 +285,7 @@ pub struct Arguments {
     pub jvm: Option<Vec<ArgItem>>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AssetIndex {
     pub id: String,
@@ -298,13 +298,13 @@ pub struct AssetIndex {
     pub total_size: Option<u64>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Downloads {
     #[serde(default)]
     pub client: Option<Download>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JavaVersion {
     /// 自动下载用的运行时名（`jre-legacy` / `java-runtime-gamma` / `-delta` …）。
@@ -313,21 +313,32 @@ pub struct JavaVersion {
     pub major_version: u32,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoggingConfig {
     pub argument: String,
-    pub file: Download,
+    pub file: LoggingFile,
     #[serde(rename = "type", default)]
     pub kind: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+/// 日志配置文件：比普通 Download 多一个 id（落盘文件名）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoggingFile {
+    pub id: String,
+    pub url: String,
+    #[serde(default)]
+    pub sha1: String,
+    #[serde(default)]
+    pub size: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Logging {
     #[serde(default)]
     pub client: Option<LoggingConfig>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VersionJson {
     pub id: String,
@@ -536,6 +547,36 @@ pub fn resolve_libraries(
 // ---------------------------------------------------------------------------
 // 启动参数
 // ---------------------------------------------------------------------------
+
+/// 取版本的 (major, minor, patch) 数字前缀；缺失的段按 0 计，非数字开头返回 None。
+///
+/// **全站只有这一份版本比较实现**：assets 的 virtual 布局判定、Log4Shell 缓解、
+/// Java 版本选择都要"这个版本比那个版本老吗"，各写一份迟早对不上。
+pub fn version_parts(version: &str) -> Option<(u32, u32, u32)> {
+    let take = |s: &str| -> Option<u32> { s.split(['-', '_']).next()?.parse().ok() };
+    let mut parts = version.split('.');
+    let major = take(parts.next()?)?;
+    let minor = parts.next().and_then(take).unwrap_or(0);
+    let patch = parts.next().and_then(take).unwrap_or(0);
+    Some((major, minor, patch))
+}
+
+/// 该版本是否受 Log4Shell（CVE-2021-44228）影响：1.7 到 **1.18.1** 都带着受影响的 log4j2，
+/// 1.18.2 起 Mojang 换成了修好的版本。缓解方式是加 `-Dlog4j2.formatMsgNoLookups=true`。
+pub fn needs_log4shell_mitigation(version: &str) -> bool {
+    let Some((major, minor, patch)) = version_parts(version) else {
+        // 解析不出来（快照等）：1.18.2 之后的快照都已修好，更老的不在支持范围内
+        return false;
+    };
+    if major != 1 {
+        return false;
+    }
+    match minor {
+        7..=17 => true,
+        18 => patch < 2,
+        _ => false,
+    }
+}
 
 /// 替换 `${key}`；未提供的键原样保留（比默默换成空串好诊断得多）。
 pub fn substitute(token: &str, vars: &HashMap<String, String>) -> String {
@@ -1207,6 +1248,41 @@ mod tests {
             &win(),
             &f
         ));
+    }
+
+    #[test]
+    fn log4shell_mitigation_range_is_exact() {
+        // 1.18.2 起 Mojang 换了修好的 log4j；1.7–1.18.1 需要缓解参数
+        for v in [
+            "1.7.10", "1.8.9", "1.12.2", "1.16.5", "1.17", "1.18", "1.18.1",
+        ] {
+            assert!(needs_log4shell_mitigation(v), "{v} should be mitigated");
+        }
+        for v in [
+            "1.18.2",
+            "1.19",
+            "1.20.1",
+            "1.21.4",
+            "26.4-snapshot-6",
+            "",
+            "rd-132211",
+            "1.6.4",
+        ] {
+            assert!(
+                !needs_log4shell_mitigation(v),
+                "{v} should not be mitigated"
+            );
+        }
+    }
+
+    #[test]
+    fn version_parts_handles_missing_and_odd_segments() {
+        assert_eq!(version_parts("1.21.4"), Some((1, 21, 4)));
+        assert_eq!(version_parts("1.18"), Some((1, 18, 0)));
+        assert_eq!(version_parts("1.18.2-pre1"), Some((1, 18, 2)));
+        assert_eq!(version_parts("26.4-snapshot-6"), Some((26, 4, 0)));
+        assert_eq!(version_parts("rd-132211"), None);
+        assert_eq!(version_parts(""), None);
     }
 
     #[test]

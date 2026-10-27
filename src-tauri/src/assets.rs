@@ -109,24 +109,11 @@ pub fn virtual_copies(
 }
 
 /// 只有 1.8 之前的游戏需要 virtual 布局。
+/// 解析不出版本号（快照如 "26.4-snapshot-6"、远古 "rd-132211"）时按"不需要"处理：
+/// 快照都是现代的，远古版本不在支持范围内（计划决策 5）。
 pub fn needs_virtual_layout(game_version: &str) -> bool {
-    match major_minor(game_version) {
-        Some((major, minor)) => (major, minor) < (1, 8),
-        // 解析不出版本号（快照如 "26.4-snapshot-6"、或远古 "rd-132211"）：
-        // 快照都是现代的，远古版本不在支持范围内（计划决策 5）
-        None => false,
-    }
-}
-
-/// 取版本的 major.minor 数字前缀；非数字开头返回 None。
-fn major_minor(version: &str) -> Option<(u32, u32)> {
-    let mut parts = version.split('.');
-    let major: u32 = parts.next()?.split(['-', '_']).next()?.parse().ok()?;
-    let minor: u32 = match parts.next() {
-        Some(p) => p.split(['-', '_']).next()?.parse().ok()?,
-        None => 0,
-    };
-    Some((major, minor))
+    crate::version::version_parts(game_version)
+        .is_some_and(|(major, minor, _)| (major, minor) < (1, 8))
 }
 
 #[cfg(test)]
