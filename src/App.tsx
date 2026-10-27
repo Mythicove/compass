@@ -10,7 +10,7 @@ const DEFAULT_LAUNCHER = "prismlauncher";
 
 function App() {
   const [auth, setAuth] = useState<AuthState | null>(null);
-  const [email, setEmail] = useState("");
+  const [playerName, setPlayerName] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [mods, setMods] = useState<HoardProject[]>([]);
@@ -31,7 +31,7 @@ function App() {
   const doLogin = async () => {
     setError(null);
     try {
-      setAuth(await login(email, password));
+      setAuth(await login(playerName, password));
     } catch (e) {
       setError(String(e));
     }
@@ -94,17 +94,21 @@ function App() {
           {!auth ? (
             <>
               <input
-                placeholder="Email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
+                placeholder="Player name"
+                value={playerName}
+                onChange={(e) => setPlayerName(e.target.value)}
               />
               <input
                 type="password"
-                placeholder="Password"
+                placeholder="Launcher password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
               />
               <button onClick={doLogin}>Sign in via Yggdrasil</button>
+              <p className="hint">
+                Use the player name plus its launcher password — not your site password. Create one
+                on the site under Profile → Launcher sign-in.
+              </p>
               {error && <p className="error">{error}</p>}
             </>
           ) : (

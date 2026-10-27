@@ -65,10 +65,11 @@ export interface SearchResult<T> {
 }
 
 export const mirrorClient = {
-  authenticate: (email: string, password: string) =>
+  // username 是玩家名，password 是该玩家的启动器独立密码（不是网站主密码）
+  authenticate: (playerName: string, password: string) =>
     api<AuthenticateResponse>("/authserver/authenticate", {
       method: "POST",
-      body: JSON.stringify({ username: email, password }),
+      body: JSON.stringify({ username: playerName, password }),
     }),
 
   skinUrl: (name: string) => `${apiUrl()}/skin/${name}`,
