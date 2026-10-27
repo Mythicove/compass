@@ -1,0 +1,56 @@
+{
+ "objects": {
+  "icons/icon_128x128.png": {
+   "hash": "b62ca8ec10d07e6bf5ac8dae0c8c1d2e6a1e3356",
+   "size": 9101
+  },
+  "icons/icon_16x16.png": {
+   "hash": "5ff04807c356f1beed0b86ccf659b44b9983e3fa",
+   "size": 781
+  },
+  "icons/icon_256x256.png": {
+   "hash": "8030dd9dc315c0381d52c4782ea36c6baf6e8135",
+   "size": 19642
+  },
+  "icons/icon_32x32.png": {
+   "hash": "af96f55a90eaf11b327f1b5f8834a051027dc506",
+   "size": 2063
+  },
+  "icons/icon_48x48.png": {
+   "hash": "b80b6e9ff01c78c624df5429e1d3dcd3d5130834",
+   "size": 3409
+  },
+  "icons/minecraft.icns": {
+   "hash": "f00657542252858a721e715a2e888a9226404e35",
+   "size": 374665
+  },
+  "icons/snapshot/icon_128x128.png": {
+   "hash": "958d57021d8009de55d6e9e19957a72545e3c30c",
+   "size": 9083
+  },
+  "icons/snapshot/icon_16x16.png": {
+   "hash": "949afe72d4d3d785dab52d8baaefeb0e38b3c067",
+   "size": 783
+  },
+  "icons/snapshot/icon_256x256.png": {
+   "hash": "9f84f917a09facacf1235eed3fa77789e4554afb",
+   "size": 19683
+  },
+  "icons/snapshot/icon_32x32.png": {
+   "hash": "26ad18d9f4ef0a71255459b5f01b738b81dbc7dc",
+   "size": 1970
+  },
+  "icons/snapshot/icon_48x48.png": {
+   "hash": "df274fe57c49ef1af6d218703d805db76a5c8af9",
+   "size": 3225
+  },
+  "icons/snapshot/minecraft.icns": {
+   "hash": "65ebca3306ccd6d7f9d5de8f1cc7a1216d80246d",
+   "size": 318515
+  },
+  "sounds/duplicate-of-first.ogg": {
+   "hash": "b62ca8ec10d07e6bf5ac8dae0c8c1d2e6a1e3356",
+   "size": 9101
+  }
+ }
+}

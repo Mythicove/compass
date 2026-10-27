@@ -6,9 +6,12 @@
 
 pub mod account;
 pub mod api;
+pub mod assets;
 pub mod commands;
 pub mod config;
 pub mod error;
+pub mod meta;
+pub mod net;
 pub mod paths;
 pub mod state;
 pub mod version;

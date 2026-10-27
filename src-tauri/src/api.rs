@@ -157,7 +157,7 @@ impl ApiClient {
 /// 把非 2xx 变成 `Error::Api`，并尽量抽出**稳定错误码**。
 /// Mirror 有两种错误形状：账号端点 `{"error": ...}`（本地化文案或稳定码），
 /// Yggdrasil 端点 `{"error": ..., "errorMessage": ...}`（稳定码在 errorMessage 里）。
-fn api_error(status: u16, body: &str) -> Error {
+pub(crate) fn api_error(status: u16, body: &str) -> Error {
     let code = serde_json::from_str::<serde_json::Value>(body)
         .ok()
         .and_then(|v| {

@@ -20,6 +20,9 @@ pub enum Error {
         code: String,
         detail: String,
     },
+    /// 下载内容的 sha1/大小与来源给的不一致：文件已丢弃，绝不落到目标路径。
+    #[error("checksum mismatch: {0}")]
+    Checksum(String),
     #[error("invalid url: {0}")]
     Url(String),
     #[error("invalid input: {0}")]
@@ -36,6 +39,7 @@ impl Error {
             Error::Http(_) => "network",
             Error::Api { code, .. } if !code.is_empty() => code.as_str(),
             Error::Api { .. } => "api",
+            Error::Checksum(_) => "checksum",
             Error::Url(_) | Error::Invalid(_) => "invalid",
         }
         .to_string()
