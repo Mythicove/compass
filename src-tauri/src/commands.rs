@@ -3,17 +3,33 @@
 //! 命令一律是**具名**的，不提供 `request(url)` 这类通用转发：通用转发等于把桌面应用
 //! 变成开放代理，也会让收紧后的 CSP 失去意义（见 api.rs 的模块注释）。
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use tauri::State;
+use serde::Serialize;
+use tauri::{AppHandle, Emitter, State};
+use tokio::sync::Notify;
 
 use crate::account::{self, Account, AccountView, now_unix};
-use crate::api::png_data_url;
-use crate::api::{Project, SearchResponse, Version};
+use crate::api::{Project, SearchResponse, Version, png_data_url};
+use crate::authlibinjector;
 use crate::config::{self, Config};
 use crate::error::Error;
-use crate::paths::PathsInfo;
-use crate::state::AppState;
+use crate::install::{InstalledVersion, Installer};
+use crate::instance::{self, Instance};
+use crate::java::{self, JavaRuntime};
+use crate::launch;
+use crate::meta::{ManifestEntry, MetaClient};
+use crate::net::Downloader;
+use crate::paths::{Paths, PathsInfo};
+use crate::runner;
+use crate::state::{AppState, GameExit, RunningGame};
+use crate::version::{OsInfo, VersionJson};
+
+/// 前端订阅的事件名：下载进度 / 游戏日志 / 游戏退出。
+pub const PROGRESS_EVENT: &str = "compass://progress";
+pub const LOG_EVENT: &str = "compass://game-log";
+pub const EXIT_EVENT: &str = "compass://game-exit";
 
 #[tauri::command]
 pub async fn get_config(state: State<'_, Arc<AppState>>) -> Result<Config, Error> {
@@ -155,4 +171,324 @@ pub async fn hoard_versions(
 ) -> Result<Vec<Version>, Error> {
     let base = state.config.read().await.hoard_url.clone();
     state.api.hoard_versions(&base, &project_id).await
+}
+
+// ---------------------------------------------------------------------------
+// 版本 / 安装
+// ---------------------------------------------------------------------------
+
+/// 可安装的版本列表（来自 piston-meta 的清单）。快照默认不列：否则列表里全是噪音。
+#[tauri::command]
+pub async fn versions_list(
+    state: State<'_, Arc<AppState>>,
+    include_snapshots: bool,
+) -> Result<Vec<ManifestEntry>, Error> {
+    let cfg = state.config.read().await.clone();
+    let meta = MetaClient::new(state.http.clone(), cfg.download.mirror.clone());
+    let manifest = meta.manifest().await?;
+    Ok(if include_snapshots {
+        manifest.versions
+    } else {
+        manifest.releases().cloned().collect()
+    })
+}
+
+/// 本地已装好的版本（合并后的版本 JSON 在磁盘上 = 可离线启动）。
+#[tauri::command]
+pub async fn versions_installed(state: State<'_, Arc<AppState>>) -> Result<Vec<String>, Error> {
+    let mut out = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(state.paths.versions()) {
+        for entry in entries.flatten() {
+            let id = entry.file_name().to_string_lossy().to_string();
+            if entry.path().join(format!("{id}.json")).is_file() {
+                out.push(id);
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// 安装一个版本到全局缓存（幂等）。进度经 `compass://progress` 事件推送。
+#[tauri::command]
+pub async fn install_version(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    version_id: String,
+) -> Result<InstalledVersion, Error> {
+    let cfg = state.config.read().await.clone();
+    let meta = MetaClient::new(state.http.clone(), cfg.download.mirror.clone());
+    let dl = Downloader::new(
+        state.http.clone(),
+        cfg.download.concurrency,
+        cfg.download.mirror.clone(),
+    );
+    let installer = Installer::new(meta, dl, state.paths.clone());
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let emitter = app.clone();
+    let forwarder = tokio::spawn(async move {
+        while let Some(p) = rx.recv().await {
+            let _ = emitter.emit(PROGRESS_EVENT, p);
+        }
+    });
+    let result = installer.install(&version_id, Some(tx)).await;
+    // tx 随 result 之后被 drop，转发任务随之结束
+    let _ = forwarder.await;
+    result
+}
+
+// ---------------------------------------------------------------------------
+// 实例
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn instance_list(state: State<'_, Arc<AppState>>) -> Result<Vec<Instance>, Error> {
+    Ok(instance::list(&state.paths))
+}
+
+/// 建实例：目录 + instance.json + 游戏目录。版本本身由 `install_version` 单独装
+/// （多个实例可以共享同一个版本，所以两件事不绑在一起）。
+#[tauri::command]
+pub async fn instance_create(
+    state: State<'_, Arc<AppState>>,
+    slug: String,
+    name: String,
+    version_id: String,
+) -> Result<Instance, Error> {
+    if instance::config_file(&state.paths, &slug)?.exists() {
+        return Err(Error::Invalid(format!("instance already exists: {slug}")));
+    }
+    let cfg = state.config.read().await.clone();
+    let inst = Instance {
+        slug: slug.clone(),
+        name: if name.trim().is_empty() {
+            slug.clone()
+        } else {
+            name.trim().to_string()
+        },
+        version_id,
+        created_at: now_unix(),
+        memory_mb: Some(cfg.defaults.memory_mb),
+        ..Instance::default()
+    };
+    instance::save(&state.paths, &inst)?;
+    Ok(inst)
+}
+
+#[tauri::command]
+pub async fn instance_delete(state: State<'_, Arc<AppState>>, slug: String) -> Result<(), Error> {
+    // 正在跑的实例不能删：进程还握着 .minecraft 里的文件
+    if state
+        .running
+        .read()
+        .await
+        .as_ref()
+        .is_some_and(|r| r.instance == slug)
+    {
+        return Err(Error::Invalid(
+            "stop the game before deleting its instance".into(),
+        ));
+    }
+    instance::remove(&state.paths, &slug)
+}
+
+/// 这个实例的版本装好了吗（前端据此决定按钮是"安装"还是"启动"）。
+#[tauri::command]
+pub async fn instance_ready(state: State<'_, Arc<AppState>>, slug: String) -> Result<bool, Error> {
+    let inst = instance::load(&state.paths, &slug)?;
+    Ok(state
+        .paths
+        .versions()
+        .join(&inst.version_id)
+        .join(format!("{}.json", inst.version_id))
+        .is_file())
+}
+
+/// 探测这个实例会用哪个 Java（UI 展示 + 让用户在启动前就知道缺 Java）。
+#[tauri::command]
+pub async fn instance_java(
+    state: State<'_, Arc<AppState>>,
+    slug: String,
+) -> Result<Option<JavaRuntime>, Error> {
+    let inst = instance::load(&state.paths, &slug)?;
+    if let Some(p) = &inst.java_path {
+        return Ok(java::probe(p).await);
+    }
+    let version = read_installed_version(&state.paths, &inst.version_id)?;
+    let (major, exact) = runner::java_requirement(&version);
+    Ok(java::find(major, exact, Some(&state.paths.java())).await)
+}
+
+// ---------------------------------------------------------------------------
+// 启动 / 停止
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LaunchInfo {
+    pub instance: String,
+    pub version_id: String,
+    pub java: PathBuf,
+    pub java_version: u32,
+}
+
+/// 启动游戏。日志经 `compass://game-log` 推送，退出经 `compass://game-exit` 推送。
+///
+/// P1 只允许同时跑一个游戏进程：两个客户端用同一个账号令牌会让服务端的会话互相顶掉，
+/// 而"多开"是 P2 的实例级选项（要先想清楚每个实例用哪个账号）。
+#[tauri::command]
+pub async fn instance_launch(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    slug: String,
+) -> Result<LaunchInfo, Error> {
+    if state.running.read().await.is_some() {
+        return Err(Error::Invalid("a game is already running".into()));
+    }
+    let cfg = state.config.read().await.clone();
+    let account = state
+        .account
+        .read()
+        .await
+        .clone()
+        .ok_or(Error::NotSignedIn)?;
+    let inst = instance::load(&state.paths, &slug)?;
+    let version = read_installed_version(&state.paths, &inst.version_id)?;
+    let os = OsInfo::current();
+
+    // Java：实例指定优先，否则按版本要求探测（老版本必须正好是 Java 8）
+    let (major, exact) = runner::java_requirement(&version);
+    let runtime = match &inst.java_path {
+        Some(p) => java::probe(p)
+            .await
+            .ok_or_else(|| Error::Config(format!("{} is not a usable java", p.display())))?,
+        None => java::find(major, exact, Some(&state.paths.java()))
+            .await
+            .ok_or_else(|| {
+                Error::Config(format!(
+                    "no Java {major} runtime found (安装 JDK {major} 或在设置里指定路径)"
+                ))
+            })?,
+    };
+
+    // authlib-injector：没有它游戏能启动，但认不到我们的皮肤站
+    let dl = Downloader::new(
+        state.http.clone(),
+        cfg.download.concurrency,
+        cfg.download.mirror.clone(),
+    );
+    let injector = authlibinjector::ensure(&state.paths, &dl).await?;
+    let meta = MetaClient::new(state.http.clone(), cfg.download.mirror.clone());
+    let prefetched = authlibinjector::prefetch_meta(&meta, &cfg.api_url).await;
+
+    let input = runner::LaunchInput {
+        instance: &inst,
+        account: &account,
+        version: &version,
+        os: &os,
+        paths: &state.paths,
+        default_memory_mb: cfg.defaults.memory_mb,
+        api_url: &cfg.api_url,
+        java: runtime.path.clone(),
+        authlib_jar: Some(injector),
+        prefetched_meta: prefetched,
+    };
+    let plan = runner::build(&input)?;
+    let natives = runner::natives_to_extract(&input);
+    let natives_dir = instance::natives_dir(&state.paths, &slug)?;
+    launch::extract_natives(&natives, &natives_dir)?;
+
+    let info = LaunchInfo {
+        instance: slug.clone(),
+        version_id: inst.version_id.clone(),
+        java: runtime.path.clone(),
+        java_version: runtime.version,
+    };
+
+    // 先登记"正在运行"再拉起进程：反过来的话，进程可能在登记之前就退出了
+    let kill = Arc::new(Notify::new());
+    *state.running.write().await = Some(RunningGame {
+        instance: slug.clone(),
+        started_at: now_unix(),
+        kill: Arc::clone(&kill),
+    });
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let log_emitter = app.clone();
+    tokio::spawn(async move {
+        while let Some(line) = rx.recv().await {
+            let _ = log_emitter.emit(LOG_EVENT, line);
+        }
+    });
+
+    let supervisor_state = state.inner().clone();
+    let supervisor_app = app.clone();
+    tokio::spawn(async move {
+        let result = launch::run(plan, tx, kill).await;
+        *supervisor_state.running.write().await = None;
+        let code = match result {
+            Ok(code) => code,
+            Err(e) => {
+                let _ = supervisor_app.emit(
+                    LOG_EVENT,
+                    launch::LogLine {
+                        stream: "stderr".to_string(),
+                        line: format!("launcher: {e}"),
+                    },
+                );
+                Some(-1)
+            }
+        };
+        let _ = supervisor_app.emit(
+            EXIT_EVENT,
+            GameExit {
+                instance: slug.clone(),
+                code,
+            },
+        );
+    });
+
+    // 启动计数（失败也不该拦住启动本身）
+    let mut updated = inst;
+    updated.launches += 1;
+    updated.last_launched_at = Some(now_unix());
+    let _ = instance::save(&state.paths, &updated);
+
+    Ok(info)
+}
+
+#[tauri::command]
+pub async fn instance_stop(state: State<'_, Arc<AppState>>) -> Result<bool, Error> {
+    let running = state.running.read().await;
+    if let Some(game) = running.as_ref() {
+        game.kill.notify_one();
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+#[tauri::command]
+pub async fn game_running(state: State<'_, Arc<AppState>>) -> Result<Option<String>, Error> {
+    Ok(state
+        .running
+        .read()
+        .await
+        .as_ref()
+        .map(|r| r.instance.clone()))
+}
+
+/// 读安装期落盘的合并版本 JSON。
+fn read_installed_version(paths: &Paths, version_id: &str) -> Result<VersionJson, Error> {
+    let file = paths
+        .versions()
+        .join(version_id)
+        .join(format!("{version_id}.json"));
+    let text = std::fs::read_to_string(&file).map_err(|_| {
+        Error::Invalid(format!(
+            "version {version_id} is not installed (先安装该版本)"
+        ))
+    })?;
+    VersionJson::parse(&text).map_err(|e| Error::Config(format!("{}: {e}", file.display())))
 }

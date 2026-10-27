@@ -19,14 +19,18 @@ pub struct ApiClient {
     http: reqwest::Client,
 }
 
+/// 全站共用的 HTTP 客户端（连接池复用）：ApiClient、MetaClient 与下载器都用它。
+pub fn http_client() -> Result<reqwest::Client, Error> {
+    Ok(reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(REQUEST_TIMEOUT)
+        .user_agent(concat!("MythicCompass/", env!("CARGO_PKG_VERSION")))
+        .build()?)
+}
+
 impl ApiClient {
-    pub fn new() -> Result<Self, Error> {
-        let http = reqwest::Client::builder()
-            .connect_timeout(CONNECT_TIMEOUT)
-            .timeout(REQUEST_TIMEOUT)
-            .user_agent(concat!("MythicCompass/", env!("CARGO_PKG_VERSION")))
-            .build()?;
-        Ok(Self { http })
+    pub fn new(http: reqwest::Client) -> Self {
+        Self { http }
     }
 
     // ---- Mirror / Yggdrasil ----

@@ -87,6 +87,80 @@ export interface SearchResult<T> {
   total_hits: number;
 }
 
+/** 版本清单条目（piston-meta）。 */
+export interface ManifestEntry {
+  id: string;
+  type: string;
+  url: string;
+  time: string;
+  releaseTime: string;
+  sha1?: string;
+}
+
+export interface DownloadSummary {
+  downloaded: number;
+  skipped: number;
+  bytes: number;
+  failed: string[];
+}
+
+export interface InstalledVersion {
+  id: string;
+  jarVersion: string;
+  assetIndexId: string;
+  mainClass: string;
+  javaMajor: number;
+  download: DownloadSummary;
+}
+
+export interface Instance {
+  slug: string;
+  name: string;
+  versionId: string;
+  createdAt: number;
+  lastLaunchedAt: number | null;
+  launches: number;
+  memoryMb: number | null;
+  javaPath: string | null;
+}
+
+export interface JavaRuntime {
+  path: string;
+  version: number;
+  is64bit: boolean;
+}
+
+export interface LaunchInfo {
+  instance: string;
+  versionId: string;
+  java: string;
+  javaVersion: number;
+}
+
+/** 事件载荷（Rust 侧经 Tauri event 推送）。 */
+export interface FileProgress {
+  url: string;
+  doneBytes: number;
+  totalBytes: number;
+}
+
+export interface LogLine {
+  stream: "stdout" | "stderr" | string;
+  line: string;
+}
+
+export interface GameExit {
+  instance: string;
+  /** null = 用户主动停止（与"游戏崩了"必须能区分） */
+  code: number | null;
+}
+
+export const EVENTS = {
+  progress: "compass://progress",
+  gameLog: "compass://game-log",
+  gameExit: "compass://game-exit",
+} as const;
+
 /** Rust 侧 `Error` 序列化后的形状：`code` 用于本地化，`message` 只用于日志。 */
 export interface IpcErrorBody {
   code: string;
@@ -134,4 +208,25 @@ export const ipc = {
     invoke<SearchResult<HoardProject>>("hoard_search", { q, offset, limit }),
   hoardVersions: (projectId: string) =>
     invoke<HoardVersion[]>("hoard_versions", { projectId }),
+
+  // ---- 版本与安装 ----
+  versionsList: (includeSnapshots: boolean) =>
+    invoke<ManifestEntry[]>("versions_list", { includeSnapshots }),
+  versionsInstalled: () => invoke<string[]>("versions_installed"),
+  /** 装到全局缓存（幂等）；进度经 EVENTS.progress 推送 */
+  installVersion: (versionId: string) => invoke<InstalledVersion>("install_version", { versionId }),
+
+  // ---- 实例 ----
+  instanceList: () => invoke<Instance[]>("instance_list"),
+  instanceCreate: (slug: string, name: string, versionId: string) =>
+    invoke<Instance>("instance_create", { slug, name, versionId }),
+  instanceDelete: (slug: string) => invoke<void>("instance_delete", { slug }),
+  instanceReady: (slug: string) => invoke<boolean>("instance_ready", { slug }),
+  /** 这个实例会用哪个 Java；null = 没找到（此时启动会失败，UI 要提前说清楚） */
+  instanceJava: (slug: string) => invoke<JavaRuntime | null>("instance_java", { slug }),
+
+  // ---- 启动 ----
+  instanceLaunch: (slug: string) => invoke<LaunchInfo>("instance_launch", { slug }),
+  instanceStop: () => invoke<boolean>("instance_stop"),
+  gameRunning: () => invoke<string | null>("game_running"),
 };

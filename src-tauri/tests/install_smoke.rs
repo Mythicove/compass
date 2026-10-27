@@ -163,9 +163,9 @@ async fn installs_a_real_version_and_produces_a_consistent_launch_plan() {
     let extracted = launch::extract_natives(&natives, &natives_dir).unwrap();
     assert_eq!(extracted, 0);
     println!("spawning {:?}", plan.program);
-    let child = launch::spawn(&plan).await.unwrap();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let pump = tokio::spawn(launch::pump_logs(child, tx));
+    let kill = std::sync::Arc::new(tokio::sync::Notify::new());
+    let runner = tokio::spawn(launch::run(plan.clone(), tx, std::sync::Arc::clone(&kill)));
     let mut seen_user = false;
     let mut seen_lwjgl = false;
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(240);
@@ -183,7 +183,14 @@ async fn installs_a_real_version_and_produces_a_consistent_launch_plan() {
             seen_lwjgl = true;
         }
     }
-    pump.abort();
+    // 主动停止（退出码为 None 表示"被我们杀掉"，不是崩溃）
+    kill.notify_one();
+    let exited = tokio::time::timeout(std::time::Duration::from_secs(30), runner)
+        .await
+        .expect("game should exit after kill")
+        .unwrap()
+        .unwrap();
+    assert_eq!(exited, None, "被停止的进程不该有退出码");
     assert!(seen_user, "游戏没到 'Setting user:'——认证参数有问题");
     assert!(seen_lwjgl, "游戏没加载 LWJGL——classpath/natives 有问题");
 }

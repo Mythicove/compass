@@ -5,14 +5,16 @@ import { HomeView } from "./views/home";
 import { InstancesView } from "./views/instances";
 import { ModsView } from "./views/mods";
 import { SettingsView } from "./views/settings";
+import { LogsView } from "./views/logs";
 import "./App.css";
 
-type View = "home" | "instances" | "mods" | "settings";
+type View = "home" | "instances" | "mods" | "logs" | "settings";
 
 const VIEWS: { id: View; labelKey: string }[] = [
   { id: "home", labelKey: "nav.home" },
   { id: "instances", labelKey: "nav.instances" },
   { id: "mods", labelKey: "nav.mods" },
+  { id: "logs", labelKey: "nav.logs" },
   { id: "settings", labelKey: "nav.settings" },
 ];
 
@@ -134,6 +136,7 @@ function Shell() {
         )}
         {view === "instances" && <InstancesView />}
         {view === "mods" && <ModsView />}
+        {view === "logs" && <LogsView />}
         {view === "settings" && <SettingsView />}
       </main>
     </div>

@@ -30,6 +30,9 @@ pub enum Error {
     Url(String),
     #[error("invalid input: {0}")]
     Invalid(String),
+    /// 需要登录（启动游戏要用玩家名 + 令牌）。
+    #[error("not signed in")]
+    NotSignedIn,
 }
 
 impl Error {
@@ -45,6 +48,7 @@ impl Error {
             Error::Api { .. } => "api",
             Error::Checksum(_) => "checksum",
             Error::Url(_) | Error::Invalid(_) => "invalid",
+            Error::NotSignedIn => "auth",
         }
         .to_string()
     }

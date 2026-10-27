@@ -58,6 +58,12 @@ pub fn config_file(paths: &Paths, slug: &str) -> Result<PathBuf, Error> {
     Ok(instance_dir(paths, slug)?.join("instance.json"))
 }
 
+/// natives 解压目录。每次启动前清空重建（残留上一版本的 .dll/.so 会造成
+/// "换了游戏版本之后偶发崩溃"），所以放在实例目录而不是全局缓存里。
+pub fn natives_dir(paths: &Paths, slug: &str) -> Result<PathBuf, Error> {
+    Ok(instance_dir(paths, slug)?.join("natives"))
+}
+
 pub fn load(paths: &Paths, slug: &str) -> Result<Instance, Error> {
     let file = config_file(paths, slug)?;
     let text = std::fs::read_to_string(&file)?;

@@ -50,8 +50,9 @@ pub fn run() {
                 ),
             };
 
-            let api = ApiClient::new().map_err(|e| e.to_string())?;
-            app.manage(AppState::new(paths, api, config, account, warning));
+            let http = api::http_client().map_err(|e| e.to_string())?;
+            let api = ApiClient::new(http.clone());
+            app.manage(AppState::new(paths, api, http, config, account, warning));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -65,7 +66,18 @@ pub fn run() {
             commands::auth_check,
             commands::mirror_skin_data_url,
             commands::hoard_search,
-            commands::hoard_versions
+            commands::hoard_versions,
+            commands::versions_list,
+            commands::versions_installed,
+            commands::install_version,
+            commands::instance_list,
+            commands::instance_create,
+            commands::instance_delete,
+            commands::instance_ready,
+            commands::instance_java,
+            commands::instance_launch,
+            commands::instance_stop,
+            commands::game_running
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

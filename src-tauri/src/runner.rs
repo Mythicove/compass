@@ -46,7 +46,7 @@ pub struct LaunchInput<'a> {
 /// 组装启动计划。
 pub fn build(input: &LaunchInput) -> Result<LaunchPlan, Error> {
     let game_dir = instance::game_dir(input.paths, &input.instance.slug)?;
-    let natives_dir = instance::instance_dir(input.paths, &input.instance.slug)?.join("natives");
+    let natives_dir = instance::natives_dir(input.paths, &input.instance.slug)?;
     let asset_index_id = input
         .version
         .asset_index_id()

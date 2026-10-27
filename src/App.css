@@ -373,3 +373,50 @@ button.link:hover:not(:disabled) {
     padding: 16px;
   }
 }
+
+/* ---- 复选、日志与多选列表 ---- */
+
+.check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.check input {
+  width: auto;
+  padding: 0;
+}
+
+select[multiple] {
+  min-height: 168px;
+  padding: 4px;
+}
+
+select[multiple] option {
+  padding: 3px 8px;
+  border-radius: 6px;
+}
+
+.log {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  max-height: 55vh;
+  overflow-y: auto;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.log-line {
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-muted);
+}
+
+.log-line.err {
+  color: var(--danger);
+}

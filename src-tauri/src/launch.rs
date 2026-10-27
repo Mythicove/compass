@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::Serialize;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -332,24 +333,40 @@ pub struct LogLine {
     pub line: String,
 }
 
-/// 把子进程的输出逐行转发到 channel，并等待退出，返回退出码。
+/// 拉起游戏并看管它：逐行转发日志，直到进程退出或收到停止信号。
+/// 返回退出码；被我们杀掉时返回 `None`——"用户主动停止"与"游戏崩了"必须能区分，
+/// 否则崩溃诊断（P5）会把每次手动停止都当成一次崩溃。
+///
 /// 两个流都要读：只读一个会让另一个的管道写满，游戏随之卡死（经典的管道死锁）。
-pub async fn pump_logs(
-    mut child: Child,
-    tx: tokio::sync::mpsc::UnboundedSender<LogLine>,
-) -> Result<i32, Error> {
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-    let tx_out = tx.clone();
-    let handles = Vec::from([
-        stdout.map(|s| tokio::spawn(forward(s, "stdout", tx_out))),
-        stderr.map(|s| tokio::spawn(forward(s, "stderr", tx))),
-    ]);
-    let status = child.wait().await?;
-    for h in handles.into_iter().flatten() {
-        let _ = h.await;
+pub async fn run(
+    plan: LaunchPlan,
+    logs: tokio::sync::mpsc::UnboundedSender<LogLine>,
+    kill: Arc<tokio::sync::Notify>,
+) -> Result<Option<i32>, Error> {
+    let mut child = spawn(&plan).await?;
+    let handles = [
+        child
+            .stdout
+            .take()
+            .map(|s| tokio::spawn(forward(s, "stdout", logs.clone()))),
+        child
+            .stderr
+            .take()
+            .map(|s| tokio::spawn(forward(s, "stderr", logs))),
+    ];
+    tokio::select! {
+        status = child.wait() => {
+            for h in handles.into_iter().flatten() {
+                let _ = h.await;
+            }
+            Ok(status?.code())
+        }
+        () = kill.notified() => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            Ok(None)
+        }
     }
-    Ok(status.code().unwrap_or(-1))
 }
 
 async fn forward<R: tokio::io::AsyncRead + Unpin + Send + 'static>(

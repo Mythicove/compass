@@ -3,8 +3,8 @@
 //! 解析是纯函数（对着真实清单样本做契约测试）；网络请求统一经 `net::rewrite_mirror`，
 //! 于是"换镜像"对清单、版本 JSON、资源、库**全都**生效，不需要每个模块各写一遍。
 
-use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 
 use crate::api::api_error;
 use crate::assets::AssetIndex;
@@ -15,13 +15,13 @@ use crate::version::VersionJson;
 pub const VERSION_MANIFEST_URL: &str =
     "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Latest {
     pub release: String,
     pub snapshot: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ManifestEntry {
     pub id: String,
@@ -38,7 +38,7 @@ pub struct ManifestEntry {
     pub compliance_level: u32,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VersionManifest {
     pub latest: Latest,
     pub versions: Vec<ManifestEntry>,
