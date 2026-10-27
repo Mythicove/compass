@@ -2,7 +2,7 @@
 
 **English** | [简体中文](./README.zh-CN.md)
 
-A Minecraft launcher prototype (Tauri 2 + React) plugged into the Mythicove ecosystem: Yggdrasil login, skinview3d skin preview, and browsing plus downloading mods and modpacks (.mrpack) from mythic-hoard. It targets private groups and small communities, not the public market.
+A Minecraft launcher prototype (Tauri 2 + React) plugged into the Mythicove ecosystem: Yggdrasil login, skinview3d skin preview, and browsing mods and modpacks from mythic-hoard. It targets private groups and small communities, not the public market.
 
 ## Status (prototype)
 
@@ -10,10 +10,10 @@ Implemented:
 
 - Yggdrasil username and password login against mythic-mirror, with persistent sessions
 - skinview3d 3D skin preview
-- Project and version listing from mythic-hoard, with .mrpack downloads
-- Handing the actual game launch to an external launcher (Prism Launcher by default) via --import
+- Mod and modpack listing and versions from mythic-hoard; download and install land with the development plan
+- Native-launch Rust modules (version parsing, downloads, Java detection, argument construction, process management, instances) implemented and tested; Tauri command wiring in progress
 
-Still missing: native Minecraft launching (Java detection, piston-meta version manifests, asset downloads, authlib-injector injection, instance management), download progress and checksums, i18n and auto-update. It is a single-page prototype today; see the [status page](https://docs.gov.skin/plans/status/).
+Still missing: Tauri command and UI wiring (download progress UI, i18n, auto-update, CI, three-platform packaging). It is a single-page prototype today; see the [status page](https://docs.gov.skin/plans/status/).
 
 ## Run
 

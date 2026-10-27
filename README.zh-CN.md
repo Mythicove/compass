@@ -10,10 +10,10 @@ Minecraft 启动器原型（Tauri 2 + React），接入 Mythicove 生态：Yggdr
 
 - Yggdrasil 账号密码登录（对接 mythic-mirror），会话持久化
 - skinview3d 3D 皮肤预览
-- 从 mythic-hoard 拉取项目和版本列表，下载 .mrpack
-- 委托外部启动器（默认 Prism Launcher）用 --import 接管实际启动
+- 从 mythic-hoard 拉取 Mod、整合包与版本列表（下载与安装随开发计划落地）
+- 原生启动 Rust 模块（版本解析、资源下载、Java 探测、参数构造、进程管理、实例）已实现并有测试，Tauri 命令接线进行中
 
-尚未实现：原生 Minecraft 启动（Java 检测、piston-meta 版本清单、asset 下载、authlib-injector 注入、实例管理）、下载进度和校验、i18n、自动更新。当前是单页原型，详见[当前进度](https://docs.gov.skin/plans/status/)。
+尚未实现：Tauri 命令与 UI 接线（下载进度与校验 UI、i18n、自动更新、CI、三平台打包）。阶段计划与验收见 [Compass 启动器开发计划](https://docs.gov.skin/plans/compass-launcher/)。
 
 ## 运行
 

@@ -22,19 +22,28 @@ use crate::error::Error;
 const ATTEMPTS: u32 = 3;
 const BACKOFF: std::time::Duration = std::time::Duration::from_millis(500);
 
-/// 官方源主机：只有这些能被镜像 1:1 替换路径。其它主机（maven.fabricmc.net、
-/// maven.neoforged.net、GitHub release 等）**不改写**——镜像并不代管它们，
+/// 官方源主机 → 它在镜像上的路径前缀。不在表里的主机（maven.fabricmc.net、
+/// maven.neoforged.net、GitHub release 等）**一律不改写**：镜像并不代管它们，
 /// 改写了只会把一个能用的 URL 变成 404。
-const MIRRORABLE_HOSTS: &[&str] = &[
-    "piston-meta.mojang.com",
-    "piston-data.mojang.com",
-    "launchermeta.mojang.com",
-    "launcher.mojang.com",
-    "resources.download.minecraft.net",
-    "libraries.minecraft.net",
-];
+///
+/// 前缀不是可有可无的细节：BMCLAPI 把 `libraries.minecraft.net` 挂在 `/maven/` 下，
+/// 其余（piston-meta/piston-data/resources/launchermeta）才是路径 1:1。
+/// 少了这条映射，配了镜像的用户的**库文件会全部 404**——而库是数量最多的一类文件。
+fn mirror_prefix(host: &str) -> Option<&'static str> {
+    Some(match host {
+        "libraries.minecraft.net" => "/maven",
+        "piston-meta.mojang.com"
+        | "piston-data.mojang.com"
+        | "launchermeta.mojang.com"
+        | "launcher.mojang.com"
+        | "resources.download.minecraft.net" => "",
+        _ => return None,
+    })
+}
 
 /// 把官方源 URL 改写到镜像；镜像为空或主机不在白名单时原样返回。
+/// 这里假定镜像是 **BMCLAPI 兼容布局**（目前唯一广泛使用的镜像约定）；
+/// 布局不同的镜像应当留空不用，而不是让我们去猜。
 pub fn rewrite_mirror(url: &str, mirror: &str) -> String {
     let mirror = mirror.trim().trim_end_matches('/');
     if mirror.is_empty() {
@@ -46,10 +55,26 @@ pub fn rewrite_mirror(url: &str, mirror: &str) -> String {
     let Some(host) = parsed.host_str() else {
         return url.to_string();
     };
-    if !MIRRORABLE_HOSTS.contains(&host) {
+    let Some(prefix) = mirror_prefix(host) else {
         return url.to_string();
+    };
+    format!("{mirror}{prefix}{}", parsed.path())
+}
+
+/// 一个文件要依次尝试的 URL：镜像优先，**镜像失败退回官方源**。
+///
+/// 这不是多余的保险：镜像会出现"部分路径 403/404、其余正常"的状态（实测 BMCLAPI 的
+/// /maven 在部分网络下就是这样），此时官方源反而是通的。反过来在官方源被墙的网络里，
+/// 回退只会多一次快速失败，代价可接受。
+///
+/// 非官方源（Fabric/NeoForge 的 Maven、GitHub release）既不改写也不回退——它们只有一个来源。
+pub fn candidate_urls(url: &str, mirror: &str) -> Vec<String> {
+    let rewritten = rewrite_mirror(url, mirror);
+    if rewritten == url {
+        vec![url.to_string()]
+    } else {
+        vec![rewritten, url.to_string()]
     }
-    format!("{mirror}{}", parsed.path())
 }
 
 #[derive(Debug, Clone)]
@@ -137,27 +162,29 @@ impl Downloader {
         if let Some(parent) = task.dest.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
-        let url = rewrite_mirror(&task.url, &self.mirror);
         let part = task.part_path();
 
         let mut last_err = Error::Config("download failed".into());
-        for attempt in 0..ATTEMPTS {
-            if attempt > 0 {
-                tokio::time::sleep(BACKOFF * attempt).await;
-            }
-            match self.attempt(&url, &part, task, progress).await {
-                Ok(bytes) => {
-                    // 校验不过就删掉重来：半截/损坏文件绝不能被当成"已下载"
-                    if let Err(e) = verify(&part, task).await {
-                        let _ = tokio::fs::remove_file(&part).await;
-                        last_err = e;
-                        continue;
-                    }
-                    tokio::fs::rename(&part, &task.dest).await?;
-                    return Ok(bytes);
+        // 镜像优先，失败退回官方源（见 candidate_urls 的理由）
+        for url in candidate_urls(&task.url, &self.mirror) {
+            for attempt in 0..ATTEMPTS {
+                if attempt > 0 {
+                    tokio::time::sleep(BACKOFF * attempt).await;
                 }
-                // 网络类错误保留 .part 以便下次续传
-                Err(e) => last_err = e,
+                match self.attempt(&url, &part, task, progress).await {
+                    Ok(bytes) => {
+                        // 校验不过就删掉重来：半截/损坏文件绝不能被当成"已下载"
+                        if let Err(e) = verify(&part, task).await {
+                            let _ = tokio::fs::remove_file(&part).await;
+                            last_err = e;
+                            continue;
+                        }
+                        tokio::fs::rename(&part, &task.dest).await?;
+                        return Ok(bytes);
+                    }
+                    // 网络类错误保留 .part 以便下次续传
+                    Err(e) => last_err = e,
+                }
             }
         }
         Err(last_err)
@@ -248,11 +275,17 @@ impl Downloader {
                         s.downloaded += 1;
                         s.bytes += bytes;
                     }
-                    Err(e) => summary
-                        .lock()
-                        .await
-                        .failed
-                        .push(format!("{}: {e}", task.url)),
+                    Err(e) => {
+                        // 报**实际请求的 URL**：配了镜像时只显示原始域名的话，
+                        // 用户根本没法判断是源站坏了还是镜像坏了。
+                        let effective = rewrite_mirror(&task.url, &this.mirror);
+                        let label = if effective == task.url {
+                            task.url.clone()
+                        } else {
+                            format!("{} (via {effective})", task.url)
+                        };
+                        summary.lock().await.failed.push(format!("{label}: {e}"));
+                    }
                 }
             }
         }))
@@ -260,6 +293,18 @@ impl Downloader {
         while stream.next().await.is_some() {}
         summary.lock().await.clone()
     }
+}
+
+/// 把失败清单压成一句人能读的话：最多列 5 条，其余只报数量。
+/// 一次装版本可能有几千个文件，把全部失败塞进一个错误串只会让 UI 和日志没法看。
+pub fn format_failures(failed: &[String]) -> String {
+    const SHOW: usize = 5;
+    let shown: Vec<&str> = failed.iter().take(SHOW).map(String::as_str).collect();
+    let mut msg = shown.join("; ");
+    if failed.len() > SHOW {
+        msg.push_str(&format!("; … 另 {} 个", failed.len() - SHOW));
+    }
+    msg
 }
 
 /// 校验 sha1 与大小。没有校验和时只比大小（来源没给就无从校验，记录在案即可）。
@@ -315,6 +360,13 @@ mod tests {
     #[test]
     fn mirror_rewrites_only_official_hosts() {
         let m = "https://bmclapi2.bangbang93.com";
+        // libraries 在 BMCLAPI 上挂在 /maven/ 下（不是路径 1:1）：
+        // 少了这条映射，配了镜像的用户的库文件会全部 404
+        assert_eq!(
+            rewrite_mirror("https://libraries.minecraft.net/org/lwjgl/x.jar", m),
+            "https://bmclapi2.bangbang93.com/maven/org/lwjgl/x.jar"
+        );
+        // 资源对象与 piston-* 才是路径 1:1
         assert_eq!(
             rewrite_mirror("https://piston-data.mojang.com/v1/objects/ab/client.jar", m),
             "https://bmclapi2.bangbang93.com/v1/objects/ab/client.jar"
@@ -322,10 +374,6 @@ mod tests {
         assert_eq!(
             rewrite_mirror("https://resources.download.minecraft.net/ab/abcd", m),
             "https://bmclapi2.bangbang93.com/ab/abcd"
-        );
-        assert_eq!(
-            rewrite_mirror("https://libraries.minecraft.net/org/lwjgl/x.jar", m),
-            "https://bmclapi2.bangbang93.com/org/lwjgl/x.jar"
         );
         // 非官方源不改写：镜像不代管它们，改了只会 404
         assert_eq!(
@@ -342,6 +390,41 @@ mod tests {
             "https://m.example/x"
         );
         assert_eq!(rewrite_mirror("not a url", m), "not a url");
+    }
+
+    #[test]
+    fn failures_are_truncated_to_something_readable() {
+        let many: Vec<String> = (0..12).map(|i| format!("file{i}: 404")).collect();
+        let msg = format_failures(&many);
+        assert!(msg.contains("file0: 404"));
+        assert!(msg.contains("file4: 404"));
+        assert!(!msg.contains("file5"), "只列前 5 条：{msg}");
+        assert!(msg.contains("另 7 个"), "{msg}");
+        assert_eq!(format_failures(&[]), "");
+        assert_eq!(format_failures(&["only-one".to_string()]), "only-one");
+    }
+
+    #[test]
+    fn mirror_is_tried_first_then_the_official_source() {
+        let m = "https://bmclapi2.bangbang93.com";
+        // 官方源：镜像在前，官方在后（镜像部分失效时才有救）
+        assert_eq!(
+            candidate_urls("https://libraries.minecraft.net/org/lwjgl/x.jar", m),
+            vec![
+                "https://bmclapi2.bangbang93.com/maven/org/lwjgl/x.jar".to_string(),
+                "https://libraries.minecraft.net/org/lwjgl/x.jar".to_string()
+            ]
+        );
+        // 没配镜像：只有一个候选，不做无谓的第二次尝试
+        assert_eq!(
+            candidate_urls("https://libraries.minecraft.net/x.jar", ""),
+            vec!["https://libraries.minecraft.net/x.jar".to_string()]
+        );
+        // 非官方源：不改写也就不回退（它只有一个来源）
+        assert_eq!(
+            candidate_urls("https://maven.fabricmc.net/net/fabricmc/x.jar", m),
+            vec!["https://maven.fabricmc.net/net/fabricmc/x.jar".to_string()]
+        );
     }
 
     #[test]

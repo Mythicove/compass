@@ -79,6 +79,43 @@ jobs:
       - name: build frontend
         run: pnpm build
 
+  # 真下载冒烟：装一个真实的 1.21.4（约 550MB），再断言"装出来的东西与我们拼的命令行自洽"
+  # （classpath 每一项都在磁盘上、资源对象数量与索引一致、日志配置在预期位置）。
+  # 只在 main 与手动触发时跑：一次要下几百 MB，不该让每个 PR 都付这个钱。
+  smoke:
+    name: install smoke (${{ matrix.platform }})
+    if: github.event_name != 'pull_request'
+    needs: check
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ubuntu-latest
+          - platform: windows-latest
+          - platform: macos-latest
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install linux dependencies
+        if: matrix.platform == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
+            libayatana-appindicator3-dev patchelf build-essential curl wget file
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: install a real version and check the launch plan
+        working-directory: src-tauri
+        # COMPASS_SMOKE_LAUNCH 不设：runner 没有显示环境，只验"装得对 + 命令行自洽"。
+        # 真的拉起游戏由人工验收清单覆盖（计划文档 P1 验收）。
+        run: cargo test --release --test install_smoke -- --ignored --nocapture
+
   package:
     name: package (${{ matrix.platform }})
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'create' && github.event.ref_type == 'tag')

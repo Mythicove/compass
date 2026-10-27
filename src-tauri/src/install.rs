@@ -13,7 +13,7 @@ use serde::Serialize;
 use crate::assets::{self, AssetIndex};
 use crate::error::Error;
 use crate::meta::MetaClient;
-use crate::net::{Downloader, FileTask, ProgressSink, Summary};
+use crate::net::{Downloader, FileTask, ProgressSink, Summary, format_failures};
 use crate::paths::Paths;
 use crate::version::{self, Features, LibraryKind, OsInfo, VersionJson};
 
@@ -134,7 +134,7 @@ impl Installer {
             return Err(Error::Config(format!(
                 "failed to download {} file(s): {}",
                 summary.failed.len(),
-                summary.failed.join("; ")
+                format_failures(&summary.failed)
             )));
         }
 
@@ -147,7 +147,7 @@ impl Installer {
             return Err(Error::Config(format!(
                 "failed to download {} asset(s): {}",
                 assets_summary.failed.len(),
-                assets_summary.failed[..assets_summary.failed.len().min(5)].join("; ")
+                format_failures(&assets_summary.failed)
             )));
         }
         summary.downloaded += assets_summary.downloaded;

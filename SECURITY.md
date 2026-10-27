@@ -1,4 +1,4 @@
-# Security Policy
+# Security policy
 
 Canonical policy on the docs site: [English](https://docs.gov.skin/en/community/security/) · [中文](https://docs.gov.skin/community/security/)
 
