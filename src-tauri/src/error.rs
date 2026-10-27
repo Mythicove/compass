@@ -12,6 +12,9 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error("http: {0}")]
     Http(#[from] reqwest::Error),
+    /// jar/zip 读取失败（natives 解压、P3 的整合包安装）。
+    #[error("archive: {0}")]
+    Archive(#[from] zip::result::ZipError),
     /// 后端返回非 2xx。`code` 取 body 里的稳定错误码（如 mirror 的 `binding_required`），
     /// 取不到时按状态码给一个通用码，前端至少能落到状态码文案。
     #[error("api {status}: {detail}")]
@@ -37,6 +40,7 @@ impl Error {
             Error::Config(_) => "config",
             Error::Io(_) => "io",
             Error::Http(_) => "network",
+            Error::Archive(_) => "archive",
             Error::Api { code, .. } if !code.is_empty() => code.as_str(),
             Error::Api { .. } => "api",
             Error::Checksum(_) => "checksum",

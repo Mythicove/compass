@@ -41,6 +41,8 @@ base64 = "0.22"
 regex = "1"
 # 探测操作系统版本串与架构（规则求值与 Java 选择都要用）；不自己 spawn `uname`/`ver`
 os_info = "3"
+# natives jar 的解压（老版本 LWJGL）与 P3 的整合包安装都用它
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 tempfile = "3"
