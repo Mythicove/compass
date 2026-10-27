@@ -1,0 +1,36 @@
+# License History
+
+**English** | [中文](./LICENSE.history.zh-CN.md)
+
+> This file is context for readers, not the license itself; the canonical terms are in [LICENSE](./LICENSE).
+
+## Active license: Elastic License 2.0 (ELv2)
+
+From commit `65487d6` (2026-10-26) onward, this repository is licensed under the **Elastic License 2.0**. See [LICENSE](./LICENSE) for the full text. Licensor: Hsukqi Lee / Mythicove <team@tsinbei.com>.
+
+## Historical license: AGPL-3.0
+
+All commits up to and including `afd7f59` were released under the **GNU Affero General Public License v3.0**. No release tags were ever published, so there is no formal AGPL release; however, pre-relicense commits in the git history remain licensed under AGPL-3.0, and those grants are irrevocable for those versions.
+
+## Why the change
+
+See [ADR-0004 (license policy)](https://mythicove.github.io/docs/architecture/adr-0004-license/), revised 2026-10-24. In short:
+
+- The project's intent is to prevent third parties from running it as a commercial hosted service — not to force derivatives open source. AGPL's copyleft raised the barrier for launcher/plugin/self-hosting ecosystem integration.
+- ELv2's three restrictions match that intent exactly: no offering the software as a managed service to third parties, no circumventing license keys, no removing notices. Everything else (self-hosting, internal use, modification, client integration) remains free.
+- The project has a single author and no external contributors, so the relicense applies unilaterally — and only to versions released after the relicense commit.
+
+## What this means in practice
+
+| Scenario | Result |
+|---|---|
+| Forked the repo before 2026-10-26 | Your snapshot stays AGPL-3.0 forever; code synced from upstream after the relicense carries ELv2. |
+| Self-hosting, modification, building on it, client integration | Permitted under ELv2. |
+| Offering it as a managed or hosted service to third parties | Not permitted under ELv2; a separate commercial license is required — contact <team@tsinbei.com>. |
+
+## References
+
+- [LICENSE](./LICENSE) — current license text (ELv2)
+- [ADR-0004](https://mythicove.github.io/docs/architecture/adr-0004-license/) — decision record
+- ELv2 official text: <https://www.elastic.co/licensing/elastic-license>
+- AGPL-3.0 original text: <https://www.gnu.org/licenses/agpl-3.0.html>

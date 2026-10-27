@@ -1,28 +1,32 @@
 # Mythic Compass
 
-Minecraft 启动器原型（Tauri 2 + React），接入 Mythicove 生态：Yggdrasil 登录、skinview3d 皮肤预览、从 `mythic-hoard` 浏览并下载 mod/整合包（`.mrpack`）。定位私群/小社区场景，不是公共市场竞争者。
+**English** | [简体中文](./README.zh-CN.md)
 
-## 现状（原型）
+Minecraft launcher prototype (Tauri 2 + React) plugged into the Mythicove ecosystem: Yggdrasil login, skinview3d skin preview, browsing and downloading mods/modpacks (`.mrpack`) from `mythic-hoard`. Aimed at private groups and small communities, not a public-market competitor.
 
-已实现：
+## Status (prototype)
 
-- Yggdrasil 账号密码登录（对接 `mythic-mirror`），会话持久化
-- skinview3d 3D 皮肤预览
-- 从 `mythic-hoard` 拉取项目/版本列表，下载 `.mrpack`
-- 委托外部启动器（默认 Prism Launcher）`--import` 接管实际启动
+Implemented:
 
-**未实现（与"启动器"之名的差距）**：原生 Minecraft 启动（Java 检测、piston-meta 版本清单、asset 下载、authlib-injector 注入、实例管理）、下载进度/校验、i18n、自动更新。当前是单页原型，详见 `docs/plans/status.md`。
+- Yggdrasil username/password login (against `mythic-mirror`), persistent sessions
+- skinview3d 3D skin preview
+- Project/version listing from `mythic-hoard`, `.mrpack` downloads
+- Delegates the actual game launch to an external launcher (Prism Launcher by default) via `--import`
 
-## 运行
+**Not implemented (the gap to a real "launcher")**: native Minecraft launching (Java detection, piston-meta version manifests, asset downloads, authlib-injector injection, instance management), download progress/checksums, i18n, auto-update. Currently a single-page prototype; see `docs/plans/status.md`.
+
+## Run
 
 ```bash
 pnpm install
-pnpm tauri dev      # 开发
-pnpm tauri build    # 打包
+pnpm tauri dev      # development
+pnpm tauri build    # packaging
 ```
 
-API 地址默认 `http://localhost:8080`（统一 API 域名），可在界面/`localStorage` 覆盖。
+The API base URL defaults to `http://localhost:8080` (unified API domain) and can be overridden in the UI or `localStorage`.
 
-## 许可证
+## License
 
 [Elastic License 2.0 (ELv2)](./LICENSE)
+
+This repository was previously developed under AGPL-3.0 (no releases tagged) and relicensed to ELv2 on 2026-10-26; see [LICENSE.history](./LICENSE.history) for details.
