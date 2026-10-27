@@ -1,167 +1,172 @@
-import { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { hoardClient, mirrorClient, type HoardProject, type HoardVersion } from "./lib/api";
-import { login, loadAuth, saveAuth, type AuthState } from "./lib/auth";
-import { SkinPreview } from "./components/skin-preview";
+import { createContext, useCallback, useContext, useEffect, useState } from "react";
+import { I18nProvider, detectLocale, errorKey, useI18n, type Locale } from "./i18n";
+import { ipc, toIpcError, type AccountView, type Config } from "./lib/ipc";
+import { HomeView } from "./views/home";
+import { InstancesView } from "./views/instances";
+import { ModsView } from "./views/mods";
+import { SettingsView } from "./views/settings";
 import "./App.css";
 
-const LAUNCHER_KEY = "compass-launcher";
-const DEFAULT_LAUNCHER = "prismlauncher";
+type View = "home" | "instances" | "mods" | "settings";
 
-function App() {
-  const [auth, setAuth] = useState<AuthState | null>(null);
-  const [playerName, setPlayerName] = useState("");
-  const [password, setPassword] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const [mods, setMods] = useState<HoardProject[]>([]);
-  const [versions, setVersions] = useState<Record<string, HoardVersion[]>>({});
-  const [launcher, setLauncher] = useState(
-    () => localStorage.getItem(LAUNCHER_KEY) ?? DEFAULT_LAUNCHER,
-  );
-  const [status, setStatus] = useState<string | null>(null);
+const VIEWS: { id: View; labelKey: string }[] = [
+  { id: "home", labelKey: "nav.home" },
+  { id: "instances", labelKey: "nav.instances" },
+  { id: "mods", labelKey: "nav.mods" },
+  { id: "settings", labelKey: "nav.settings" },
+];
 
+// 设置页读写全局配置；语言与主题变化要立刻反映到整个应用，故提到这一层。
+const ConfigContext = createContext<{
+  config: Config | null;
+  onConfigSaved: (c: Config) => void;
+}>({ config: null, onConfigSaved: () => {} });
+
+export function useConfig() {
+  return useContext(ConfigContext);
+}
+
+/** 把主题落到 <html data-theme>；system 时跟随系统并订阅其变化。 */
+function useTheme(theme: Config["theme"] | undefined) {
   useEffect(() => {
-    setAuth(loadAuth());
-    hoardClient
-      .search()
-      .then((r) => setMods(r.hits))
-      .catch(() => {});
-  }, []);
+    const root = document.documentElement;
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const apply = () => {
+      const resolved =
+        theme === "system" || theme === undefined
+          ? media.matches
+            ? "dark"
+            : "light"
+          : theme;
+      root.dataset.theme = resolved;
+      root.style.colorScheme = resolved;
+    };
+    apply();
+    media.addEventListener("change", apply);
+    return () => media.removeEventListener("change", apply);
+  }, [theme]);
+}
 
-  const doLogin = async () => {
+function Shell() {
+  const { t } = useI18n();
+  const [view, setView] = useState<View>("home");
+  const [account, setAccount] = useState<AccountView | null>(null);
+  const [checking, setChecking] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  // 启动时校验一次本地令牌：失效则清掉登录态，网络错误仍算已登录（Rust 侧的语义）
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const current = await ipc.authCheck();
+        if (!cancelled) setAccount(current);
+      } catch (e) {
+        if (!cancelled) setError(t(errorKey(toIpcError(e).code)));
+      } finally {
+        if (!cancelled) setChecking(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [t]);
+
+  const signIn = async (playerName: string, password: string) => {
     setError(null);
     try {
-      setAuth(await login(playerName, password));
+      setAccount(await ipc.authLogin(playerName, password));
     } catch (e) {
-      setError(String(e));
+      setError(t(errorKey(toIpcError(e).code)));
     }
   };
 
-  const logout = () => {
-    saveAuth(null);
-    setAuth(null);
-  };
-
-  const saveLauncher = (v: string) => {
-    setLauncher(v);
-    localStorage.setItem(LAUNCHER_KEY, v);
-  };
-
-  const loadVersions = async (m: HoardProject) => {
-    if (versions[m.id]) return;
-    try {
-      const vs = await hoardClient.versions(m.id);
-      setVersions((prev) => ({ ...prev, [m.id]: vs }));
-    } catch {}
-  };
-
-  const downloadAndLaunch = async (m: HoardProject, v: HoardVersion) => {
+  const signOut = async () => {
     setError(null);
-    setStatus(null);
     try {
-      const url = hoardClient.mrpackUrl(m.id, v.id);
-      const dest = `${m.slug}-${v.version_number}.mrpack`;
-      await invoke("download_file", { url, dest });
-      setStatus(`Downloaded ${dest}. Importing into ${launcher}…`);
-      await invoke("launch", { program: launcher, args: ["--import", dest] });
+      await ipc.authLogout();
+      setAccount(null);
     } catch (e) {
-      setError(String(e));
+      setError(t(errorKey(toIpcError(e).code)));
     }
   };
 
   return (
-    <main className="app">
-      <header className="header">
+    <div className="shell">
+      <nav className="sidebar">
         <div className="brand">
           <span className="dot" />
-          <span>Mythic Compass</span>
+          <span>{t("app.name")}</span>
         </div>
-        <div className="auth">
-          {auth ? (
+        {VIEWS.map((v) => (
+          <button
+            key={v.id}
+            className={view === v.id ? "nav-item active" : "nav-item"}
+            onClick={() => setView(v.id)}
+          >
+            {t(v.labelKey)}
+          </button>
+        ))}
+        <div className="sidebar-footer">
+          {account ? (
             <>
-              <span className="player">{auth.playerName}</span>
-              <button onClick={logout}>Sign out</button>
+              <span className="who" title={account.playerUuid}>
+                {account.playerName}
+              </span>
+              <button className="link" onClick={() => void signOut()}>
+                {t("account.signOut")}
+              </button>
             </>
           ) : (
-            <span>Not signed in</span>
+            <span className="muted">{t("account.notSignedIn")}</span>
           )}
         </div>
-      </header>
+      </nav>
 
-      <section className="grid">
-        <div className="panel">
-          <h2>Sign in</h2>
-          {!auth ? (
-            <>
-              <input
-                placeholder="Player name"
-                value={playerName}
-                onChange={(e) => setPlayerName(e.target.value)}
-              />
-              <input
-                type="password"
-                placeholder="Launcher password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-              />
-              <button onClick={doLogin}>Sign in via Yggdrasil</button>
-              <p className="hint">
-                Use the player name plus its launcher password — not your site password. Create one
-                on the site under Profile → Launcher sign-in.
-              </p>
-              {error && <p className="error">{error}</p>}
-            </>
-          ) : (
-            <p className="ok">Signed in as {auth.playerName}.</p>
-          )}
-        </div>
-
-        <div className="panel preview">
-          <h2>Skin preview</h2>
-          <SkinPreview skinUrl={auth?.playerName ? mirrorClient.skinUrl(auth.playerName) : "/steve.png"} />
-        </div>
-      </section>
-
-      <section className="panel">
-        <h2>Modpacks & mods</h2>
-        <div className="mods">
-          {mods.map((m) => (
-            <div key={m.id} className="mod" onClick={() => loadVersions(m)}>
-              <div className="mod-title">
-                <span>{m.title}</span>
-                <span className="badge">{m.project_type}</span>
-              </div>
-              <p className="desc">{m.description}</p>
-              {(m.loaders ?? []).join(" · ")}
-              {versions[m.id] && (
-                <div className="versions">
-                  {versions[m.id].map((v) => (
-                    <button key={v.id} onClick={() => downloadAndLaunch(m, v)}>
-                      {v.version_number} (.mrpack)
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-          ))}
-        </div>
-      </section>
-
-      <section className="panel">
-        <h2>Launch</h2>
-        <label>
-          Launcher command
-          <input value={launcher} onChange={(e) => saveLauncher(e.target.value)} />
-        </label>
-        <p className="hint">
-          Uses an external launcher (Prism Launcher by default) to import the .mrpack and start
-          Minecraft. Add your skin server to the launcher's authlib-injector settings to load skins.
-        </p>
-        {status && <p className="ok">{status}</p>}
-        {error && <p className="error">{error}</p>}
-      </section>
-    </main>
+      <main className="content">
+        {error && (
+          <p className="error" role="alert">
+            {error}
+          </p>
+        )}
+        {view === "home" && (
+          <HomeView account={account} checking={checking} onSignIn={signIn} />
+        )}
+        {view === "instances" && <InstancesView />}
+        {view === "mods" && <ModsView />}
+        {view === "settings" && <SettingsView />}
+      </main>
+    </div>
   );
 }
 
-export default App;
+export default function App() {
+  const [config, setConfig] = useState<Config | null>(null);
+  const [locale, setLocale] = useState<Locale>(() => detectLocale(""));
+
+  useTheme(config?.theme);
+
+  useEffect(() => {
+    ipc
+      .getConfig()
+      .then((c) => {
+        setConfig(c);
+        setLocale(detectLocale(c.language));
+      })
+      // 配置读不出来也要能进设置页改地址，故不阻塞渲染
+      .catch(() => setConfig(null));
+  }, []);
+
+  const onConfigSaved = useCallback((c: Config) => {
+    setConfig(c);
+    setLocale(detectLocale(c.language));
+  }, []);
+
+  return (
+    <I18nProvider locale={locale}>
+      <ConfigContext.Provider value={{ config, onConfigSaved }}>
+        <Shell />
+      </ConfigContext.Provider>
+    </I18nProvider>
+  );
+}

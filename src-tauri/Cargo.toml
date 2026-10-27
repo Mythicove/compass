@@ -1,16 +1,21 @@
 [package]
 name = "compass"
 version = "0.1.0"
-description = "A Tauri App"
-authors = ["you"]
+description = "Mythic Compass — Mythicove 的 Minecraft 启动器（原生启动、实例与整合包管理）"
+authors = ["Mythicove"]
 edition = "2024"
+license = "Elastic-License-2.0"
+repository = "https://github.com/Mythicove/compass"
+homepage = "https://docs.mythicove.com"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [lib]
 # The `_lib` suffix may seem redundant but it is necessary
-# to make the lib name unique and wouldn't conflict with the bin name.
-# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+# to make the lib name unique as we will be using it as a dependency for Tauri Desktop
+# (see `src-tauri/tauri.conf.json` for the bin name).
+# Also, this seems to be only an issue on Windows, see
+# https://github.com/rust-lang/cargo/issues/8519
 name = "compass_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
@@ -22,13 +27,27 @@ tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+# 全部 HTTP 都在 Rust 侧（webview 不发跨域请求）：与 Mirror 的 CORS 配置和 CSP 白名单彻底解耦。
+# rustls 而非 openssl：三平台一份依赖链，Linux 上不需要系统 OpenSSL 开发包。
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "http2",
+    "charset",
+    "rustls-tls",
+] }
+tokio = { version = "1", features = ["fs", "macros", "rt-multi-thread", "sync"] }
+thiserror = "2"
+url = "2"
+base64 = "0.22"
 
+[dev-dependencies]
+tempfile = "3"
 
-# Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
+# See the optimization guideline for more details:
+# https://tauri.app/concept/size/#cargo-configuration
 [profile.release]
-codegen-units = 1
-lto = true
-opt-level = 3
-panic = "abort"
-strip = true
+codegen-units = 1 # Allows LLVM to perform better optimization.
+lto = true # Enables link-time-optimizations.
+opt-level = 3 # Prioritizes speed. Use `"s"` if binary size becomes a problem.
+panic = "abort" # Let's make sure that all of our panics are not catchable, they should always abort.
+strip = true # Ensure that debugging symbols are removed from the binary.

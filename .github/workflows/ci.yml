@@ -1,0 +1,146 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  create:
+    # 只在打 tag 时出包（见 package 作业的 if）
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: check (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - platform: windows-latest
+            target: x86_64-pc-windows-msvc
+          - platform: macos-latest
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Tauri 在 Linux 上编译时需要 WebKitGTK 与相关开发包（reqwest 用 rustls，故不需要 OpenSSL）
+      - name: install linux dependencies
+        if: matrix.platform == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
+            libayatana-appindicator3-dev patchelf build-essential curl wget file
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # 版本取自 package.json 的 packageManager 字段（单一来源）
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: rustfmt
+        working-directory: src-tauri
+        run: cargo fmt --check
+
+      - name: clippy
+        working-directory: src-tauri
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo test
+        working-directory: src-tauri
+        run: cargo test --locked
+
+      - name: typecheck
+        run: pnpm typecheck
+
+      - name: build frontend
+        run: pnpm build
+
+  package:
+    name: package (${{ matrix.platform }})
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'create' && github.event.ref_type == 'tag')
+    needs: check
+    permissions:
+      # tauri-action 需要写权限来创建 draft release
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ubuntu-latest
+            args: ""
+          - platform: windows-latest
+            # Windows 暂不签名：SmartScreen 会提示"未知发布者"，安装文档里说明。
+            # 后续若拿到 SignPath 的开源项目证书，在这里补 signCommand 即可。
+            args: ""
+          - platform: macos-latest
+            # 签名与公证需要 APPLE_CERTIFICATE / APPLE_ID / APPLE_TEAM_ID 等 secrets，
+            # 配好后 tauri-action 自动签名+公证；未配置时产出未签名 dmg。
+            args: ""
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install linux dependencies
+        if: matrix.platform == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
+            libayatana-appindicator3-dev patchelf build-essential curl wget file
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      # 版本取自 package.json 的 packageManager 字段（单一来源）
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      # tag 触发出正式包；手动触发（workflow_dispatch）出 dev 包供人工验收，
+      # 两种情况都必须有一个 tagName，否则 tauri-action 建不出 release。
+      - id: tagname
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "create" ]; then
+            echo "tag=${{ github.event.ref }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=dev-${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ steps.tagname.outputs.tag }}
+          releaseName: "Mythic Compass __VERSION__"
+          releaseBody: "由 CI 产出的三平台安装包（Windows 未签名，见安装文档）。"
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}
