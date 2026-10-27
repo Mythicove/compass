@@ -27,6 +27,8 @@ API 地址默认 http://localhost:8080（统一 API 域名），可在界面或 
 
 ## 许可证
 
-[Elastic License 2.0 (ELv2)](./LICENSE)
+[Elastic License 2.0 (ELv2)](./LICENSE) —— 源码可得，非 OSI 开源。许可理念与预期用法 FAQ 见文档站：[中文](https://docs.gov.skin/community/licensing/) · [English](https://docs.gov.skin/en/community/licensing/)。
+
+使用、修改、再分发启动器全部免费，包括与社区或盈利性服务器捆绑分发。ELv2 只限制三件事：把软件本身作为托管/管理服务提供给第三方、绕过 license key、移除版权声明。
 
 本仓库曾以 AGPL-3.0 开发，未发布过 tag，2026-10-26 起换证为 ELv2。历史与影响见 [LICENSE.history](./LICENSE.history)。

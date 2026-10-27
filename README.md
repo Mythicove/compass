@@ -27,6 +27,8 @@ The API base URL defaults to http://localhost:8080 (the unified API domain) and 
 
 ## License
 
-[Elastic License 2.0 (ELv2)](./LICENSE)
+[Elastic License 2.0 (ELv2)](./LICENSE) — source-available, not OSI open source. The licensing philosophy and intended-use FAQ live on the docs site: [English](https://docs.gov.skin/en/community/licensing/) · [中文](https://docs.gov.skin/community/licensing/).
+
+Using, modifying and redistributing the launcher are all free, including bundling it with your community or monetized server. ELv2 only restricts offering this software itself to third parties as a hosted/managed service, circumventing license keys, and removing notices.
 
 The repository was developed under AGPL-3.0 without any tagged release, and moved to ELv2 on 2026-10-26. See [LICENSE.history](./LICENSE.history) for the history and what it means.
