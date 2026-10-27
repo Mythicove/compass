@@ -52,6 +52,9 @@ pub struct LaunchOptions {
     pub version_name: String,
     pub version_type: String,
     pub logging_config: Option<PathBuf>,
+    /// 追加的 JVM 参数（authlib-injector 的 -javaagent 走这里；P2 起也接受实例级自定义）。
+    /// 插在版本自带的 JVM 参数之后、主类之前。
+    pub extra_jvm_args: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -213,6 +216,7 @@ pub fn build_plan(v: &VersionJson, os: &OsInfo, opts: &LaunchOptions) -> Result<
         args.push(version::substitute(&logging.argument, &vars));
     }
 
+    args.extend(opts.extra_jvm_args.iter().cloned());
     args.push(main_class.to_string());
 
     let mut game = version::game_arguments(v, os, &feats, &vars);
@@ -418,7 +422,44 @@ mod tests {
             logging_config: Some(PathBuf::from(
                 "/data/cache/versions/1.21.4/client-1.21.2.xml",
             )),
+            extra_jvm_args: vec![],
         }
+    }
+
+    #[test]
+    fn extra_jvm_args_land_before_the_main_class() {
+        // authlib-injector 的 -javaagent 走这里：它必须在主类之前，否则 JVM 当它是游戏参数
+        let mut o = opts();
+        o.extra_jvm_args = vec![
+            "-javaagent:/tools/authlib-injector-1.2.8.jar=https://mc.example.com".to_string(),
+            "-Dauthlibinjector.yggdrasil.prefetched=eyJhIjoxfQ==".to_string(),
+        ];
+        let plan = build_plan(&v1214(), &win(), &o).unwrap();
+        let main_idx = plan
+            .args
+            .iter()
+            .position(|a| a == "net.minecraft.client.main.Main")
+            .unwrap();
+        let agent_idx = plan
+            .args
+            .iter()
+            .position(|a| a.starts_with("-javaagent:"))
+            .expect("javaagent must be present");
+        assert!(
+            agent_idx < main_idx,
+            "javaagent after main class: {:?}",
+            plan.args
+        );
+        assert!(
+            plan.args[main_idx + 1..]
+                .iter()
+                .all(|a| !a.starts_with("-javaagent:") && !a.starts_with("-Dauthlibinjector"))
+        );
+        assert!(
+            plan.args
+                .iter()
+                .any(|a| a.starts_with("-Dauthlibinjector.yggdrasil.prefetched="))
+        );
     }
 
     #[test]

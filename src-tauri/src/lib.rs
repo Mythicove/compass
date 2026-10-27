@@ -7,6 +7,7 @@
 pub mod account;
 pub mod api;
 pub mod assets;
+pub mod authlibinjector;
 pub mod commands;
 pub mod config;
 pub mod error;
@@ -17,6 +18,7 @@ pub mod launch;
 pub mod meta;
 pub mod net;
 pub mod paths;
+pub mod runner;
 pub mod state;
 pub mod version;
 

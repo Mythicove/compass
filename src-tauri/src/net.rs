@@ -13,6 +13,7 @@ use std::sync::Arc;
 use futures_util::StreamExt;
 use serde::Serialize;
 use sha1::{Digest, Sha1};
+use sha2::Sha256;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 
@@ -334,6 +335,22 @@ async fn verify(path: &Path, task: &FileTask) -> Result<(), Error> {
 pub async fn sha1_of_file(path: &Path) -> Result<String, Error> {
     let mut file = tokio::fs::File::open(path).await?;
     let mut hasher = Sha1::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut buf).await?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+/// 流式算 sha256。只给 authlib-injector 这类"会在用户机器上执行代码"的下载物用：
+/// 它们值得比通用 sha1 更强的保证。
+pub async fn sha256_of_file(path: &Path) -> Result<String, Error> {
+    let mut file = tokio::fs::File::open(path).await?;
+    let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 64 * 1024];
     loop {
         let n = file.read(&mut buf).await?;
