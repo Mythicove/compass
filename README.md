@@ -13,7 +13,7 @@ Implemented:
 - Project and version listing from mythic-hoard, with .mrpack downloads
 - Handing the actual game launch to an external launcher (Prism Launcher by default) via --import
 
-Still missing: native Minecraft launching (Java detection, piston-meta version manifests, asset downloads, authlib-injector injection, instance management), download progress and checksums, i18n and auto-update. It is a single-page prototype today; see docs/plans/status.md.
+Still missing: native Minecraft launching (Java detection, piston-meta version manifests, asset downloads, authlib-injector injection, instance management), download progress and checksums, i18n and auto-update. It is a single-page prototype today; see the [status page](https://docs.gov.skin/plans/status/).
 
 ## Run
 

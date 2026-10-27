@@ -13,7 +13,7 @@ Minecraft 启动器原型（Tauri 2 + React），接入 Mythicove 生态：Yggdr
 - 从 mythic-hoard 拉取项目和版本列表，下载 .mrpack
 - 委托外部启动器（默认 Prism Launcher）用 --import 接管实际启动
 
-尚未实现：原生 Minecraft 启动（Java 检测、piston-meta 版本清单、asset 下载、authlib-injector 注入、实例管理）、下载进度和校验、i18n、自动更新。当前是单页原型，详见 docs/plans/status.md。
+尚未实现：原生 Minecraft 启动（Java 检测、piston-meta 版本清单、asset 下载、authlib-injector 注入、实例管理）、下载进度和校验、i18n、自动更新。当前是单页原型，详见[当前进度](https://docs.gov.skin/plans/status/)。
 
 ## 运行
 
