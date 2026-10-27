@@ -45,14 +45,21 @@ impl AssetIndex {
     }
 }
 
-/// `objects/<aa>/<hash>`；hash 不是 40 位十六进制时返回 None（宁可少下一个，也不要写出怪路径）。
+/// 资源对象在**本地缓存**里的相对路径：`objects/<aa>/<hash>`。
+/// hash 不是 40 位十六进制时返回 None（宁可少下一个，也不要写出怪路径）。
 pub fn object_rel_path(hash: &str) -> Option<String> {
     valid_hash(hash)?;
     Some(format!("objects/{}/{}", &hash[..2], hash))
 }
 
+/// 资源对象的**下载 URL**：`<base>/<aa>/<hash>`。
+///
+/// 注意它比本地路径**少一层 `objects/`**——这是实测出来的（三平台 CI 与本地一致地
+/// 对带 `objects/` 的 URL 返回 404，去掉后 200 且 sha1 与索引相符）。
+/// 本地布局是我们自己的选择，URL 布局是 Mojang 的，两者不该互相推导。
 pub fn object_url(hash: &str) -> Option<String> {
-    Some(format!("{ASSETS_BASE}/{}", object_rel_path(hash)?))
+    valid_hash(hash)?;
+    Some(format!("{ASSETS_BASE}/{}/{}", &hash[..2], hash))
 }
 
 /// 资源索引在缓存里的落点：`indexes/<id>.json`。
@@ -136,16 +143,19 @@ mod tests {
     #[test]
     fn object_paths_are_content_addressed() {
         let hash = "b62ca8ec10d07e6bf5ac8dae0c8c1d2e6a1e3356";
+        // 本地布局有 objects/ 这一层……
         assert_eq!(
             object_rel_path(hash).unwrap(),
             "objects/b6/b62ca8ec10d07e6bf5ac8dae0c8c1d2e6a1e3356"
         );
+        // ……而下载 URL 没有。两者不能互相推导（实测带 objects/ 的 URL 是 404）。
         assert_eq!(
             object_url(hash).unwrap(),
-            "https://resources.download.minecraft.net/objects/b6/b62ca8ec10d07e6bf5ac8dae0c8c1d2e6a1e3356"
+            "https://resources.download.minecraft.net/b6/b62ca8ec10d07e6bf5ac8dae0c8c1d2e6a1e3356"
         );
         // 畸形 hash 不该拼出路径
         assert!(object_rel_path("nope").is_none());
+        assert!(object_url("nope").is_none());
         assert!(object_rel_path("").is_none());
         assert!(object_rel_path(&"g".repeat(40)).is_none());
         assert_eq!(index_rel_path("19"), "indexes/19.json");

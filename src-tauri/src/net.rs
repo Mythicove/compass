@@ -27,17 +27,20 @@ const BACKOFF: std::time::Duration = std::time::Duration::from_millis(500);
 /// maven.neoforged.net、GitHub release 等）**一律不改写**：镜像并不代管它们，
 /// 改写了只会把一个能用的 URL 变成 404。
 ///
-/// 前缀不是可有可无的细节：BMCLAPI 把 `libraries.minecraft.net` 挂在 `/maven/` 下，
-/// 其余（piston-meta/piston-data/resources/launchermeta）才是路径 1:1。
-/// 少了这条映射，配了镜像的用户的**库文件会全部 404**——而库是数量最多的一类文件。
+/// 前缀不是可有可无的细节，两个都是实测出来的：
+/// - BMCLAPI 把 `libraries.minecraft.net` 挂在 `/maven/` 下；
+/// - 官方资源 URL 是 `<host>/<aa>/<hash>`（**没有** `objects/`），而 BMCLAPI 把它挂在
+///   `/objects/` 下——所以资源这一条必须补前缀，否则配了镜像反而全 404。
+///
+/// 少了这两条映射，配镜像的用户会丢掉数量最多的两类文件（库与资源对象）。
 fn mirror_prefix(host: &str) -> Option<&'static str> {
     Some(match host {
         "libraries.minecraft.net" => "/maven",
+        "resources.download.minecraft.net" => "/objects",
         "piston-meta.mojang.com"
         | "piston-data.mojang.com"
         | "launchermeta.mojang.com"
-        | "launcher.mojang.com"
-        | "resources.download.minecraft.net" => "",
+        | "launcher.mojang.com" => "",
         _ => return None,
     })
 }
@@ -388,9 +391,10 @@ mod tests {
             rewrite_mirror("https://piston-data.mojang.com/v1/objects/ab/client.jar", m),
             "https://bmclapi2.bangbang93.com/v1/objects/ab/client.jar"
         );
+        // 资源对象：官方 URL 没有 objects/ 这一层，BMCLAPI 有 ⇒ 必须补前缀
         assert_eq!(
             rewrite_mirror("https://resources.download.minecraft.net/ab/abcd", m),
-            "https://bmclapi2.bangbang93.com/ab/abcd"
+            "https://bmclapi2.bangbang93.com/objects/ab/abcd"
         );
         // 非官方源不改写：镜像不代管它们，改了只会 404
         assert_eq!(
