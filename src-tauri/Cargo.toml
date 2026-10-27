@@ -39,6 +39,10 @@ tokio = { version = "1", features = ["fs", "macros", "rt-multi-thread", "sync"] 
 thiserror = "2"
 url = "2"
 base64 = "0.22"
+# 版本 JSON 的 os.version 规则是正则（如 macOS 的 "^10\."）
+regex = "1"
+# 探测操作系统版本串与架构（规则求值与 Java 选择都要用）；不自己 spawn `uname`/`ver`
+os_info = "3"
 
 [dev-dependencies]
 tempfile = "3"

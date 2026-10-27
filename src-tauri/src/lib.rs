@@ -4,13 +4,14 @@
 //! 以及后续几个阶段的版本解析、下载调度、启动参数构造与进程管理。
 //! 前端只做视图，通过**具名命令**取数据；不提供"转发任意 URL"的命令。
 
-mod account;
-mod api;
-mod commands;
-mod config;
-mod error;
-mod paths;
-mod state;
+pub mod account;
+pub mod api;
+pub mod commands;
+pub mod config;
+pub mod error;
+pub mod paths;
+pub mod state;
+pub mod version;
 
 use tauri::Manager;
 

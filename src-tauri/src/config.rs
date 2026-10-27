@@ -154,7 +154,8 @@ mod tests {
         // 只有 api_url：其余字段取默认（升级后老配置照样能读）；多余字段被忽略
         fs::write(
             paths.config_file(),
-            r#"{"api_url":"https://mirror.example.com/","future_field":1}"#,
+            // 落盘格式是 camelCase（与前端类型一致）；未知字段忽略、缺失字段取默认
+            r#"{"apiUrl":"https://mirror.example.com/","futureField":1}"#,
         )
         .unwrap();
         let cfg = load(&paths).unwrap();
