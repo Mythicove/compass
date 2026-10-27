@@ -1,6 +1,6 @@
 # Contributing
 
-Canonical guide on the docs site: [English](https://mythicove.github.io/docs/en/community/contributing/) · [中文](https://mythicove.github.io/docs/community/contributing/)
+Canonical guide on the docs site: [English](https://docs.gov.skin/en/community/contributing/) · [中文](https://docs.gov.skin/community/contributing/)
 
 Build, test, and dev environment instructions for this repository are in the [README](./README.md).
 

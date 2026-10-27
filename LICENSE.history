@@ -14,7 +14,7 @@ All commits up to and including `afd7f59` were released under the **GNU Affero G
 
 ## Why the change
 
-See [ADR-0004 (license policy)](https://mythicove.github.io/docs/architecture/adr-0004-license/), revised 2026-10-24. In short:
+See [ADR-0004 (license policy)](https://docs.gov.skin/architecture/adr-0004-license/), revised 2026-10-24. In short:
 
 - The project's intent is to prevent third parties from running it as a commercial hosted service — not to force derivatives open source. AGPL's copyleft raised the barrier for launcher/plugin/self-hosting ecosystem integration.
 - ELv2's three restrictions match that intent exactly: no offering the software as a managed service to third parties, no circumventing license keys, no removing notices. Everything else (self-hosting, internal use, modification, client integration) remains free.
@@ -31,6 +31,6 @@ See [ADR-0004 (license policy)](https://mythicove.github.io/docs/architecture/ad
 ## References
 
 - [LICENSE](./LICENSE) — current license text (ELv2)
-- [ADR-0004](https://mythicove.github.io/docs/architecture/adr-0004-license/) — decision record
+- [ADR-0004](https://docs.gov.skin/architecture/adr-0004-license/) — decision record
 - ELv2 official text: <https://www.elastic.co/licensing/elastic-license>
 - AGPL-3.0 original text: <https://www.gnu.org/licenses/agpl-3.0.html>

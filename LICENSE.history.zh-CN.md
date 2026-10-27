@@ -14,7 +14,7 @@
 
 ## 换证原因
 
-见 [ADR-0004 许可证策略](https://mythicove.github.io/docs/architecture/adr-0004-license/)（2026-10-24 修订）。要点：
+见 [ADR-0004 许可证策略](https://docs.gov.skin/architecture/adr-0004-license/)（2026-10-24 修订）。要点：
 
 - 项目本意是**反商用托管**（防止第三方把本站作为商业托管服务牟利），而非强制衍生品开源；AGPL 的 Copyleft 反而抬高了启动器/插件/自托管等生态接入门槛。
 - ELv2 的三条限制精确命中该意图：禁止作为托管/管理服务提供给第三方、禁止绕过 license key、禁止去除版权声明；其余使用（自托管、企业内部、二次开发、客户端集成）全部放开。
@@ -31,6 +31,6 @@
 ## 参考
 
 - [LICENSE](./LICENSE) — 现行许可证全文（ELv2）
-- [ADR-0004](https://mythicove.github.io/docs/architecture/adr-0004-license/) — 决策记录
+- [ADR-0004](https://docs.gov.skin/architecture/adr-0004-license/) — 决策记录
 - ELv2 官方文本：<https://www.elastic.co/licensing/elastic-license>
 - AGPL-3.0 原文：<https://www.gnu.org/licenses/agpl-3.0.html>
