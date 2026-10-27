@@ -2,35 +2,33 @@
 
 **English** | [中文](./LICENSE.history.zh-CN.md)
 
-> This file is context for readers, not the license itself; the canonical terms are in [LICENSE](./LICENSE).
+This file explains the licensing history of the repository. The license text itself is in [LICENSE](./LICENSE).
 
-## Active license: Elastic License 2.0 (ELv2)
+## Current license: Elastic License 2.0 (ELv2)
 
-From commit `65487d6` (2026-10-26) onward, this repository is licensed under the **Elastic License 2.0**. See [LICENSE](./LICENSE) for the full text. Licensor: Hsukqi Lee / Mythicove <team@tsinbei.com>.
+From commit `65487d6` (2026-10-26) onward, this repository is licensed under the Elastic License 2.0. The full text is in [LICENSE](./LICENSE). Licensor: Hsukqi Lee / Mythicove <team@tsinbei.com>.
 
-## Historical license: AGPL-3.0
+## Previous license: AGPL-3.0
 
-All commits up to and including `afd7f59` were released under the **GNU Affero General Public License v3.0**. No release tags were ever published, so there is no formal AGPL release; however, pre-relicense commits in the git history remain licensed under AGPL-3.0, and those grants are irrevocable for those versions.
+All commits up to and including `afd7f59` were released under the GNU Affero General Public License v3.0. The repository has no release tags, so there is no formal AGPL release. Commits before the relicense remain licensed under AGPL-3.0 in the git history, and those grants are irrevocable.
 
-## Why the change
+## Why the license changed
 
-See [ADR-0004 (license policy)](https://docs.gov.skin/architecture/adr-0004-license/), revised 2026-10-24. In short:
+See [ADR-0004](https://docs.gov.skin/architecture/adr-0004-license/), revised 2026-10-24. The project wants to stop third parties from running it as a commercial hosted service. AGPL copyleft also raised the barrier for launchers, plugins and self-hosted deployments to integrate, which the project did not want. ELv2 matches that intent: it forbids offering the software as a managed service to third parties, circumventing license keys and removing copyright notices, and it permits everything else, including self-hosting, internal use, modification and client integration.
 
-- The project's intent is to prevent third parties from running it as a commercial hosted service — not to force derivatives open source. AGPL's copyleft raised the barrier for launcher/plugin/self-hosting ecosystem integration.
-- ELv2's three restrictions match that intent exactly: no offering the software as a managed service to third parties, no circumventing license keys, no removing notices. Everything else (self-hosting, internal use, modification, client integration) remains free.
-- The project has a single author and no external contributors, so the relicense applies unilaterally — and only to versions released after the relicense commit.
+The project has one author and no external contributors, so the relicense needed no contributor agreement. It applies only to versions released after the relicense commit.
 
-## What this means in practice
+## What this means for you
 
-| Scenario | Result |
+| Situation | Result |
 |---|---|
-| Forked the repo before 2026-10-26 | Your snapshot stays AGPL-3.0 forever; code synced from upstream after the relicense carries ELv2. |
-| Self-hosting, modification, building on it, client integration | Permitted under ELv2. |
-| Offering it as a managed or hosted service to third parties | Not permitted under ELv2; a separate commercial license is required — contact <team@tsinbei.com>. |
+| You forked the repo before 2026-10-26 | Your snapshot stays AGPL-3.0, and you may keep using and distributing it under AGPL. Code synced from upstream after the relicense carries ELv2. |
+| You self-host, modify, build on it or integrate it into a client | Permitted under ELv2. |
+| You want to offer it as a managed or hosted service to third parties | ELv2 does not permit this. Contact <team@tsinbei.com> for a commercial license. |
 
 ## References
 
-- [LICENSE](./LICENSE) — current license text (ELv2)
-- [ADR-0004](https://docs.gov.skin/architecture/adr-0004-license/) — decision record
+- [LICENSE](./LICENSE): current license text (ELv2)
+- [ADR-0004](https://docs.gov.skin/architecture/adr-0004-license/): decision record
 - ELv2 official text: <https://www.elastic.co/licensing/elastic-license>
-- AGPL-3.0 original text: <https://www.gnu.org/licenses/agpl-3.0.html>
+- AGPL-3.0 text: <https://www.gnu.org/licenses/agpl-3.0.html>
