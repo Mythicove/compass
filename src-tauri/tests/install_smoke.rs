@@ -131,6 +131,7 @@ async fn installs_a_real_version_and_produces_a_consistent_launch_plan() {
         version_type: "release".into(),
         logging_config: logging_file(&installer, VERSION, &merged),
         extra_jvm_args: vec![],
+        extra_game_args: vec![],
     };
     let plan = launch::build_plan(&merged, &os, &opts).unwrap();
     assert!(

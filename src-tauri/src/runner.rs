@@ -117,6 +117,15 @@ pub fn build(input: &LaunchInput) -> Result<LaunchPlan, Error> {
             extra_jvm_args.push(authlibinjector::prefetched_arg(meta));
         }
     }
+    // 实例自定义的 JVM 参数排在 injector 之后：-javaagent 的位置有硬性要求
+    // （必须在主类之前），用户参数不该插到它前面去。
+    extra_jvm_args.extend(input.instance.extra_jvm_args.iter().cloned());
+
+    // Quick Play（1.20+）把它的日志写在游戏目录的 quickPlay/ 下，参数值由 launch 从
+    // game_dir 派生；目录在这里建好——本模块是碰文件系统的那一层，build_plan 是纯函数。
+    if launch::supports_quick_play(input.version) {
+        std::fs::create_dir_all(game_dir.join("quickPlay"))?;
+    }
 
     let opts = LaunchOptions {
         game_dir,
@@ -129,10 +138,9 @@ pub fn build(input: &LaunchInput) -> Result<LaunchPlan, Error> {
         java: input.java.clone(),
         // 实例覆盖优先，其次全局默认
         memory_mb: input.instance.memory_mb.unwrap_or(input.default_memory_mb),
-        // 分辨率/直连服务器/演示模式随 P2 的实例选项落地
-        resolution: None,
-        server: None,
-        demo: false,
+        resolution: input.instance.resolution.map(|r| (r.width, r.height)),
+        server: input.instance.server.clone(),
+        demo: input.instance.demo,
         player_name: input.account.player_name.clone(),
         player_uuid: input.account.player_uuid.clone(),
         access_token: input.account.access_token.clone(),
@@ -146,6 +154,7 @@ pub fn build(input: &LaunchInput) -> Result<LaunchPlan, Error> {
         },
         logging_config,
         extra_jvm_args,
+        extra_game_args: input.instance.extra_game_args.clone(),
     };
     launch::build_plan(input.version, input.os, &opts)
 }

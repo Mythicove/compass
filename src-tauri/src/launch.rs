@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 
@@ -21,9 +21,12 @@ use crate::version::{self, Features, OsInfo, OsName, VersionJson};
 
 pub const LAUNCHER_NAME: &str = "MythicCompass";
 pub const LAUNCHER_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// 直连服务器未指定端口时用 Minecraft 默认端口。
+pub const DEFAULT_SERVER_PORT: u16 = 25565;
 
-/// 直连服务器（`--server` / `--port`）。
-#[derive(Debug, Clone, PartialEq, Serialize)]
+/// 直连服务器。参数形式随版本而变，见 `build_plan`：
+/// 1.20 起 Mojang 用 Quick Play（`--quickPlayMultiplayer host:port`）取代了 `--server`/`--port`。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerJoin {
     pub host: String,
@@ -56,6 +59,8 @@ pub struct LaunchOptions {
     /// 追加的 JVM 参数（authlib-injector 的 -javaagent 走这里；P2 起也接受实例级自定义）。
     /// 插在版本自带的 JVM 参数之后、主类之前。
     pub extra_jvm_args: Vec<String>,
+    /// 追加的**游戏**参数，放在最后：用户自定义参数应当能覆盖版本模板给的同名项。
+    pub extra_game_args: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -105,7 +110,7 @@ pub fn windows_java(program: &Path) -> PathBuf {
     }
 }
 
-fn substitutions(os: &OsInfo, opts: &LaunchOptions) -> HashMap<String, String> {
+fn substitutions(v: &VersionJson, os: &OsInfo, opts: &LaunchOptions) -> HashMap<String, String> {
     let sep = classpath_separator(os);
     let mut cp: Vec<String> = opts
         .classpath
@@ -155,10 +160,26 @@ fn substitutions(os: &OsInfo, opts: &LaunchOptions) -> HashMap<String, String> {
     put("clientid", String::new());
     put("auth_xuid", "0".to_string());
     put("ignoreList", String::new());
-    put("quickPlayPath", String::new());
+    // Quick Play 的日志目录，固定在游戏目录下（1.20+ 的模板会引用它）。
+    // 老版本不引用，多一个变量没有副作用。
+    put(
+        "quickPlayPath",
+        opts.game_dir
+            .join("quickPlay")
+            .to_string_lossy()
+            .into_owned(),
+    );
     put("quickPlaySingleplayer", String::new());
-    put("quickPlayMultiplayer", String::new());
     put("quickPlayRealms", String::new());
+    // 直连服务器：Quick Play 版本用 `host:port` 作为 ${quickPlayMultiplayer}，
+    // 老版本走 build_plan 里手动追加的 --server/--port（这里留空即可）。
+    put(
+        "quickPlayMultiplayer",
+        match (&opts.server, supports_quick_play(v)) {
+            (Some(s), true) => format!("{}:{}", s.host, s.port.unwrap_or(DEFAULT_SERVER_PORT)),
+            _ => String::new(),
+        },
+    );
     if let Some((w, h)) = opts.resolution {
         put("resolution_width", w.to_string());
         put("resolution_height", h.to_string());
@@ -169,16 +190,42 @@ fn substitutions(os: &OsInfo, opts: &LaunchOptions) -> HashMap<String, String> {
     vars
 }
 
-fn features(opts: &LaunchOptions) -> Features {
+fn features(v: &VersionJson, opts: &LaunchOptions) -> Features {
     let mut f = Features::new();
     f.insert("is_demo_user".to_string(), opts.demo);
     f.insert(
         "has_custom_resolution".to_string(),
         opts.resolution.is_some(),
     );
-    // Quick Play（1.20+ 的单人/多人/Realms 快速进入）随 P2 的实例选项落地
-    f.insert("has_quick_plays_support".to_string(), false);
+    // Quick Play（1.20+ 的直连服务器方式）：只有版本模板真的声明了这些参数才开启，
+    // 否则会把 `--quickPlayMultiplayer` 塞给一个不认识它的客户端。
+    // 目录由 game_dir 派生（不给调用方"忘了设路径"的机会——那会变成"设了服务器却没连上"，
+    // 而且不报错）；runner 负责把这个目录建出来。
+    let qp = supports_quick_play(v);
+    f.insert("has_quick_plays_support".to_string(), qp);
+    f.insert(
+        "is_quick_play_multiplayer".to_string(),
+        qp && opts.server.is_some(),
+    );
     f
+}
+
+/// 这个版本是否用 Quick Play 表达"直连服务器"。
+///
+/// 判据是**版本 JSON 自己**（游戏参数模板里有没有 `--quickPlayMultiplayer`），
+/// 不是写死的版本表：Mojang 在 1.20 把 `--server`/`--port` 换成 Quick Play，
+/// 但按版本号猜会在快照、分支版本与继承型 loader 版本上出错。
+pub fn supports_quick_play(v: &VersionJson) -> bool {
+    let Some(args) = &v.arguments else {
+        return false;
+    };
+    args.game.iter().any(|item| match item {
+        version::ArgItem::Plain(s) => s.contains("quickPlayMultiplayer"),
+        version::ArgItem::Conditional { value, .. } => value
+            .items()
+            .iter()
+            .any(|s| s.contains("quickPlayMultiplayer")),
+    })
 }
 
 /// 组装完整命令行。返回的 args 里不含 program 本身。
@@ -188,8 +235,8 @@ pub fn build_plan(v: &VersionJson, os: &OsInfo, opts: &LaunchOptions) -> Result<
         .as_deref()
         .filter(|s| !s.is_empty())
         .ok_or_else(|| Error::Invalid(format!("version {} has no mainClass", v.id)))?;
-    let feats = features(opts);
-    let vars = substitutions(os, opts);
+    let feats = features(v, opts);
+    let vars = substitutions(v, os, opts);
 
     let mut args = memory_args(opts.memory_mb);
 
@@ -230,12 +277,18 @@ pub fn build_plan(v: &VersionJson, os: &OsInfo, opts: &LaunchOptions) -> Result<
             h.to_string(),
         ]);
     }
-    if let Some(server) = &opts.server {
+    // 直连服务器：1.20+ 的模板里已经有 `--quickPlayMultiplayer`（值经 substitutions 注入），
+    // 老版本没有这一项，由启动器手动追加 `--server`/`--port`。两者互斥，不能都加。
+    if let Some(server) = &opts.server
+        && !supports_quick_play(v)
+    {
         game.push("--server".to_string());
         game.push(server.host.clone());
         game.push("--port".to_string());
-        game.push(server.port.unwrap_or(25565).to_string());
+        game.push(server.port.unwrap_or(DEFAULT_SERVER_PORT).to_string());
     }
+    // 用户自定义的游戏参数放最后：让它能覆盖版本模板给的同名项
+    game.extend(opts.extra_game_args.iter().cloned());
     args.extend(game);
 
     // 兜底自检：留下任何未替换的 ${...} 都意味着拼错了参数，
@@ -403,6 +456,10 @@ mod tests {
     fn v1122() -> VersionJson {
         parse(include_str!("../tests/fixtures/1.12.2.json"))
     }
+    /// 现代版本（有 `arguments`）但**没有** Quick Play：1.20 之前的最后一代参数形式。
+    fn v1165() -> VersionJson {
+        parse(include_str!("../tests/fixtures/1.16.5.json"))
+    }
     fn win() -> OsInfo {
         OsInfo::new(OsName::Windows, "10.0", Arch::X64)
     }
@@ -440,6 +497,7 @@ mod tests {
                 "/data/cache/versions/1.21.4/client-1.21.2.xml",
             )),
             extra_jvm_args: vec![],
+            extra_game_args: vec![],
         }
     }
 
@@ -609,25 +667,6 @@ mod tests {
     }
 
     #[test]
-    fn server_join_and_demo_are_appended() {
-        let mut o = opts();
-        o.server = Some(ServerJoin {
-            host: "mc.example.com".into(),
-            port: Some(25566),
-        });
-        o.demo = true;
-        let plan = build_plan(&v1214(), &win(), &o).unwrap();
-        let args = &plan.args;
-        let i = args.iter().position(|a| a == "--server").expect("--server");
-        assert_eq!(args[i + 1], "mc.example.com");
-        assert_eq!(args[i + 3], "25566");
-        assert!(
-            args.contains(&"--demo".to_string()),
-            "demo feature must gate --demo"
-        );
-    }
-
-    #[test]
     fn missing_main_class_is_an_error() {
         let mut v = v1214();
         v.main_class = None;
@@ -710,5 +749,111 @@ mod tests {
         assert_eq!(classpath_separator(&win()), ";");
         assert_eq!(classpath_separator(&linux()), ":");
         assert_eq!(classpath_separator(&mac()), ":");
+    }
+
+    #[test]
+    fn server_join_picks_the_argument_form_the_version_understands() {
+        // 1.20 起 Mojang 用 Quick Play 取代了 --server/--port。判据取自版本 JSON 本身
+        // （模板里有没有 --quickPlayMultiplayer），所以这三代版本各自走对的那条路。
+        //
+        // P1 时这里有一个测试断言 1.21.4 会收到 `--server`，它是照着当时"无条件追加
+        // --server"的实现写的，所以一直通过——而真实的 1.21.4 客户端并不接受这个参数。
+        // 照着实现写的测试只能证明实现等于它自己；这类断言必须回到上游事实
+        // （版本 JSON / 真实客户端行为）才有意义。
+        let mut o = opts();
+        o.server = Some(ServerJoin {
+            host: "play.example.com".into(),
+            port: Some(25566),
+        });
+
+        let modern = build_plan(&v1214(), &win(), &o).unwrap();
+        let qp = modern
+            .args
+            .iter()
+            .position(|a| a == "--quickPlayMultiplayer")
+            .expect("1.21.4 应当用 Quick Play");
+        assert_eq!(modern.args[qp + 1], "play.example.com:25566");
+        assert!(
+            !modern.args.iter().any(|a| a == "--server"),
+            "两套参数只能有一套，否则客户端行为取决于它先读到哪个"
+        );
+        let path = modern
+            .args
+            .iter()
+            .position(|a| a == "--quickPlayPath")
+            .expect("Quick Play 需要日志目录");
+        assert!(
+            modern.args[path + 1].ends_with("quickPlay"),
+            "{}",
+            modern.args[path + 1]
+        );
+
+        // 1.16.5 同样是"现代"版本（有 arguments），但没有 Quick Play 模板项
+        let mid = build_plan(&v1165(), &win(), &o).unwrap();
+        assert!(
+            !mid.args.iter().any(|a| a.contains("quickPlay")),
+            "不认识 Quick Play 的版本不该收到这些参数：{:?}",
+            mid.args
+        );
+        let s = mid.args.iter().position(|a| a == "--server").unwrap();
+        assert_eq!(mid.args[s + 1], "play.example.com");
+        let p = mid.args.iter().position(|a| a == "--port").unwrap();
+        assert_eq!(mid.args[p + 1], "25566");
+
+        // legacy 也走 --server/--port，且未指定端口时用默认端口
+        let mut legacy_opts = opts();
+        legacy_opts.server = Some(ServerJoin {
+            host: "mc.example.com".into(),
+            port: None,
+        });
+        let legacy = build_plan(&v1122(), &win(), &legacy_opts).unwrap();
+        let p = legacy.args.iter().position(|a| a == "--port").unwrap();
+        assert_eq!(legacy.args[p + 1], DEFAULT_SERVER_PORT.to_string());
+    }
+
+    #[test]
+    fn quick_play_support_is_read_from_the_version_json() {
+        assert!(supports_quick_play(&v1214()));
+        assert!(
+            !supports_quick_play(&v1165()),
+            "1.16.5 没有 Quick Play，按版本号猜会在这一代上出错"
+        );
+        assert!(!supports_quick_play(&v1122()));
+    }
+
+    #[test]
+    fn demo_mode_is_expressed_by_the_feature_flag() {
+        let mut o = opts();
+        o.demo = true;
+        assert!(
+            build_plan(&v1214(), &win(), &o)
+                .unwrap()
+                .args
+                .contains(&"--demo".to_string())
+        );
+        o.demo = false;
+        assert!(
+            !build_plan(&v1214(), &win(), &o)
+                .unwrap()
+                .args
+                .contains(&"--demo".to_string())
+        );
+    }
+
+    #[test]
+    fn extra_game_args_come_after_everything_else() {
+        // 放最后才可能覆盖版本模板给的同名项（例如整合包要改 --versionType）
+        let mut o = opts();
+        o.extra_game_args = vec!["--versionType".into(), "MythicPack".into()];
+        let plan = build_plan(&v1214(), &win(), &o).unwrap();
+        let tail = &plan.args[plan.args.len() - 2..];
+        assert_eq!(tail, ["--versionType", "MythicPack"]);
+        // 主类之前，游戏参数之后
+        let main_idx = plan
+            .args
+            .iter()
+            .position(|a| a == "net.minecraft.client.main.Main")
+            .unwrap();
+        assert!(main_idx < plan.args.len() - 2);
     }
 }

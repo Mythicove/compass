@@ -10,6 +10,7 @@ pub mod assets;
 pub mod authlibinjector;
 pub mod commands;
 pub mod config;
+pub mod content;
 pub mod error;
 pub mod install;
 pub mod instance;
@@ -32,6 +33,10 @@ use crate::state::AppState;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        // 原生文件选择器：导入 mod/资源包、指定 Java 路径都靠它。
+        // 不用 HTML `<input type=file>`——webview 拿到的是不透明句柄，
+        // 而复制文件需要真实的文件系统路径。
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let paths = Paths::new(app.path().app_data_dir()?);
             paths.ensure().map_err(|e| e.to_string())?;
@@ -77,7 +82,13 @@ pub fn run() {
             commands::instance_list,
             commands::instance_create,
             commands::instance_delete,
+            commands::instance_update,
+            commands::instance_duplicate,
             commands::instance_java,
+            commands::content_list,
+            commands::content_set_enabled,
+            commands::content_import,
+            commands::content_remove,
             commands::instance_launch,
             commands::instance_stop,
             commands::game_running

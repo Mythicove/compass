@@ -13,21 +13,23 @@ use tokio::sync::Notify;
 use crate::account::{self, Account, AccountView, now_unix};
 use crate::api::{Project, SearchResponse, Version, png_data_url};
 use crate::config::{self, Config};
+use crate::content::{self, ContentItem, ContentStats, Kind};
 use crate::error::Error;
 use crate::install::{InstalledVersion, Installer};
-use crate::instance::{self, Instance};
+use crate::instance::{self, Instance, InstanceSettings};
 use crate::java::{self, JavaRuntime};
 use crate::launch;
 use crate::meta::{ManifestEntry, MetaClient};
 use crate::net::Downloader;
 use crate::paths::PathsInfo;
 use crate::runner;
-use crate::state::{AppState, GameExit, RunningGame};
+use crate::state::{AppState, CopyProgress, GameExit, RunningGame};
 
-/// 前端订阅的事件名：下载进度 / 游戏日志 / 游戏退出。
+/// 前端订阅的事件名：下载进度 / 游戏日志 / 游戏退出 / 实例复制进度。
 pub const PROGRESS_EVENT: &str = "compass://progress";
 pub const LOG_EVENT: &str = "compass://game-log";
 pub const EXIT_EVENT: &str = "compass://game-exit";
+pub const COPY_EVENT: &str = "compass://copy-progress";
 
 #[tauri::command]
 pub async fn get_config(state: State<'_, Arc<AppState>>) -> Result<Config, Error> {
@@ -54,12 +56,6 @@ pub async fn take_startup_warning(
     state: State<'_, Arc<AppState>>,
 ) -> Result<Option<String>, Error> {
     Ok(state.startup_warning.write().await.take())
-}
-
-/// 当前登录态（本地存储，不发网络请求）；返回值**不含令牌**。
-#[tauri::command]
-pub async fn auth_status(state: State<'_, Arc<AppState>>) -> Result<Option<AccountView>, Error> {
-    Ok(state.account.read().await.as_ref().map(Account::view))
 }
 
 /// 启动器登录：玩家名 + 该玩家的独立密码（ADR-0012）。
@@ -279,7 +275,14 @@ pub async fn instance_create(
 
 #[tauri::command]
 pub async fn instance_delete(state: State<'_, Arc<AppState>>, slug: String) -> Result<(), Error> {
-    // 正在跑的实例不能删：进程还握着 .minecraft 里的文件
+    require_stopped(&state, &slug).await?;
+    instance::remove(&state.paths, &slug)
+}
+
+/// 这个实例正在跑吗。跑着的时候不许删/复制/改内容：
+/// Windows 上 JVM 打开着的 jar 既不能重命名也不能删除，硬来的结果是一句
+/// sharing violation，用户看不出该做什么；复制正在写入的存档则会得到一份坏档。
+async fn require_stopped(state: &AppState, slug: &str) -> Result<(), Error> {
     if state
         .running
         .read()
@@ -288,17 +291,86 @@ pub async fn instance_delete(state: State<'_, Arc<AppState>>, slug: String) -> R
         .is_some_and(|r| r.instance == slug)
     {
         return Err(Error::Invalid(
-            "stop the game before deleting its instance".into(),
+            "stop the game before changing this instance".into(),
         ));
     }
-    instance::remove(&state.paths, &slug)
+    Ok(())
 }
 
-/// 这个实例的版本装好了吗（前端据此决定按钮是"安装"还是"启动"）。
+/// `spawn_blocking` 的 JoinError 只在任务 panic 时出现，那不是用户能修的东西。
+fn join_err(e: tokio::task::JoinError) -> Error {
+    Error::Invalid(format!("background task failed: {e}"))
+}
+
+/// 保存实例设置。校验与规范化在 `instance::sanitize_settings`（只有一处规则）。
 #[tauri::command]
-pub async fn instance_ready(state: State<'_, Arc<AppState>>, slug: String) -> Result<bool, Error> {
-    let inst = instance::load(&state.paths, &slug)?;
-    Ok(runner::installed_version_path(&state.paths, &inst.version_id).is_file())
+pub async fn instance_update(
+    state: State<'_, Arc<AppState>>,
+    slug: String,
+    settings: InstanceSettings,
+) -> Result<Instance, Error> {
+    let sanitized = instance::sanitize_settings(settings)?;
+    let paths = state.paths.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut inst = instance::load(&paths, &slug)?;
+        instance::apply_settings(&mut inst, sanitized);
+        instance::save(&paths, &inst)?;
+        Ok(inst)
+    })
+    .await
+    .map_err(join_err)?
+}
+
+/// 复制实例。进度经 `compass://copy-progress` 推送（几个 GB 的实例要复制一会儿）。
+#[tauri::command]
+pub async fn instance_duplicate(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    slug: String,
+    new_slug: String,
+    new_name: String,
+) -> Result<Instance, Error> {
+    require_stopped(&state, &slug).await?;
+    // 目标已存在时不要等到复制完才报错：先查一遍，省下几个 GB 的无谓写入
+    if instance::instance_dir(&state.paths, &new_slug)?.exists() {
+        return Err(Error::Invalid(format!(
+            "instance already exists: {new_slug}"
+        )));
+    }
+    let paths = state.paths.clone();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let emitter = app.clone();
+    let event_slug = new_slug.clone();
+    let forwarder = tokio::spawn(async move {
+        while let Some((copied, total)) = rx.recv().await {
+            let _ = emitter.emit(
+                COPY_EVENT,
+                CopyProgress {
+                    slug: event_slug.clone(),
+                    copied_bytes: copied,
+                    total_bytes: total,
+                },
+            );
+        }
+    });
+
+    let result = tokio::task::spawn_blocking(move || {
+        // 节流：一个装满存档的实例有几万个文件，每个都发一次事件会把 IPC 堵死。
+        // 16 MiB 一格足够画出平滑的进度条。
+        const STEP: u64 = 16 * 1024 * 1024;
+        let mut last = 0u64;
+        instance::duplicate(&paths, &slug, &new_slug, &new_name, |copied, total| {
+            if copied - last >= STEP || copied >= total {
+                last = copied;
+                let _ = tx.send((copied, total));
+            }
+        })
+    })
+    .await
+    .map_err(join_err)?;
+    // tx 随闭包结束被 drop，转发任务随之收尾
+    let _ = forwarder.await;
+    result
 }
 
 /// 探测这个实例会用哪个 Java（UI 展示 + 让用户在启动前就知道缺 Java）。
@@ -314,6 +386,102 @@ pub async fn instance_java(
     let version = runner::read_installed_version(&state.paths, &inst.version_id)?;
     let (major, exact) = runner::java_requirement(&version);
     Ok(java::find(major, exact, Some(&state.paths.java())).await)
+}
+
+// ---------------------------------------------------------------------------
+// 实例内容（mods / 资源包 / 光影 / 存档）
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContentListing {
+    pub kind: Kind,
+    /// 内容目录的绝对路径。UI 的"在文件管理器中打开"直接把它交给 opener 插件，
+    /// 不再多一个命令（也不给前端一个能打开任意路径的入口）。
+    pub dir: PathBuf,
+    pub items: Vec<ContentItem>,
+    pub stats: ContentStats,
+}
+
+/// 扫描一个实例的内容目录。mods 的元数据要逐个开 jar 读，几百个 mod 时是秒级操作，
+/// 所以放进 `spawn_blocking`：Tauri 命令跑在 tokio 的多线程 runtime 上，
+/// 在 worker 线程里做几百次同步 IO 会拖住其它命令。
+#[tauri::command]
+pub async fn content_list(
+    state: State<'_, Arc<AppState>>,
+    slug: String,
+    kind: Kind,
+) -> Result<ContentListing, Error> {
+    let paths = state.paths.clone();
+    tokio::task::spawn_blocking(move || {
+        let game = instance::game_dir(&paths, &slug)?;
+        // 目录不存在就建出来：返回值里的 dir 要能被文件管理器打开
+        let dir = content::ensure_dir(&game, kind)?;
+        let items = content::scan(&game, kind);
+        let stats = content::stats(&items, kind);
+        Ok(ContentListing {
+            kind,
+            dir,
+            items,
+            stats,
+        })
+    })
+    .await
+    .map_err(join_err)?
+}
+
+/// 启用/禁用一个 mod（只有 mods 支持，原因见 `content::Kind::supports_enable`）。
+#[tauri::command]
+pub async fn content_set_enabled(
+    state: State<'_, Arc<AppState>>,
+    slug: String,
+    file_name: String,
+    enabled: bool,
+) -> Result<ContentItem, Error> {
+    require_stopped(&state, &slug).await?;
+    let paths = state.paths.clone();
+    tokio::task::spawn_blocking(move || {
+        let game = instance::game_dir(&paths, &slug)?;
+        content::set_enabled(&game, &file_name, enabled)
+    })
+    .await
+    .map_err(join_err)?
+}
+
+/// 导入外部文件到内容目录。`sources` 来自原生文件选择器，所以是绝对路径；
+/// 文件名仍然在 `content::import` 里校验（拖进来的东西叫 `..` 时会写到目录外）。
+#[tauri::command]
+pub async fn content_import(
+    state: State<'_, Arc<AppState>>,
+    slug: String,
+    kind: Kind,
+    sources: Vec<PathBuf>,
+) -> Result<Vec<String>, Error> {
+    require_stopped(&state, &slug).await?;
+    let paths = state.paths.clone();
+    tokio::task::spawn_blocking(move || {
+        let game = instance::game_dir(&paths, &slug)?;
+        content::import(&game, kind, &sources)
+    })
+    .await
+    .map_err(join_err)?
+}
+
+#[tauri::command]
+pub async fn content_remove(
+    state: State<'_, Arc<AppState>>,
+    slug: String,
+    kind: Kind,
+    file_name: String,
+) -> Result<(), Error> {
+    require_stopped(&state, &slug).await?;
+    let paths = state.paths.clone();
+    tokio::task::spawn_blocking(move || {
+        let game = instance::game_dir(&paths, &slug)?;
+        content::remove(&game, kind, &file_name)
+    })
+    .await
+    .map_err(join_err)?
 }
 
 // ---------------------------------------------------------------------------

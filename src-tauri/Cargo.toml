@@ -44,6 +44,8 @@ regex = "1"
 os_info = "3"
 # natives jar 的解压（老版本 LWJGL）与 P3 的整合包安装都用它
 zip = { version = "2", default-features = false, features = ["deflate"] }
+toml = "1.1.8"
+tauri-plugin-dialog = "2.8.4"
 
 [dev-dependencies]
 tempfile = "3"

@@ -30,6 +30,10 @@ pub enum Error {
     Url(String),
     #[error("invalid input: {0}")]
     Invalid(String),
+    /// 请求的东西不存在（实例、内容文件、已装版本）。与 `Invalid` 分开：
+    /// 前者 UI 该说"没找到"，后者说"参数不对"，混在一起时用户看不出该改输入还是该先安装。
+    #[error("not found: {0}")]
+    NotFound(String),
     /// 需要登录（启动游戏要用玩家名 + 令牌）。
     #[error("not signed in")]
     NotSignedIn,
@@ -48,6 +52,7 @@ impl Error {
             Error::Api { .. } => "api",
             Error::Checksum(_) => "checksum",
             Error::Url(_) | Error::Invalid(_) => "invalid",
+            Error::NotFound(_) => "not_found",
             Error::NotSignedIn => "auth",
         }
         .to_string()

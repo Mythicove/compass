@@ -420,3 +420,105 @@ select[multiple] option {
 .log-line.err {
   color: var(--danger);
 }
+
+/* ---- P2：内容管理（表格 / 类型标签页 / 行内表单） ---- */
+.sub {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.field.inline {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+
+.field.inline > span {
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.grow {
+  flex: 1;
+}
+
+.tabs {
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.tab {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-muted);
+  padding: 4px 12px;
+  font-size: 12px;
+}
+
+.tab:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.tab.active {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #fff;
+}
+
+.items {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.items th {
+  text-align: left;
+  font-weight: 500;
+  color: var(--text-muted);
+  font-size: 12px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.items td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+
+.items td.num,
+.items th.num {
+  text-align: right;
+  font-family: var(--font-mono);
+  white-space: nowrap;
+}
+
+.items tr:last-child td {
+  border-bottom: none;
+}
+
+/* 禁用态整行压暗：一眼能看出哪些 mod 不会加载 */
+.items tr.off td {
+  opacity: 0.55;
+}
+
+.items.dropping {
+  outline: 2px dashed var(--highlight);
+  outline-offset: 4px;
+  border-radius: 8px;
+}
+
+.badge.off {
+  background: var(--surface-raised);
+  color: var(--text-muted);
+}
+
+textarea {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  resize: vertical;
+}

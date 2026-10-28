@@ -26,6 +26,19 @@ pub struct GameExit {
     pub code: Option<i32>,
 }
 
+/// 复制实例的进度（`compass://copy-progress`）。
+///
+/// 一个装满 mod 与存档的实例有几个 GB，没有进度反馈时用户会以为卡死了。
+/// 下载进度不复用这个结构：那边的单位是"文件"，这边的单位是"字节"，
+/// 硬塞进同一个载荷会让两边都得靠猜字段含义。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CopyProgress {
+    pub slug: String,
+    pub copied_bytes: u64,
+    pub total_bytes: u64,
+}
+
 pub struct AppState {
     pub paths: Paths,
     pub api: ApiClient,

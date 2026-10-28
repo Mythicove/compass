@@ -122,6 +122,77 @@ export interface Instance {
   launches: number;
   memoryMb: number | null;
   javaPath: string | null;
+  extraJvmArgs: string[];
+  extraGameArgs: string[];
+  resolution: Resolution | null;
+  server: ServerJoin | null;
+  demo: boolean;
+}
+
+export interface Resolution {
+  width: number;
+  height: number;
+}
+
+export interface ServerJoin {
+  host: string;
+  port: number | null;
+}
+
+/** 设置面板能改的字段。启动计数与最近启动时间由 Rust 侧维护，不在这里回传。 */
+export interface InstanceSettings {
+  name: string;
+  versionId: string;
+  memoryMb: number | null;
+  javaPath: string | null;
+  extraJvmArgs: string[];
+  extraGameArgs: string[];
+  resolution: Resolution | null;
+  server: ServerJoin | null;
+  demo: boolean;
+}
+
+/** 内容类型，取值就是 Minecraft 的目录名（Rust 侧 `content::Kind`）。 */
+export type ContentKind = "mods" | "resourcepacks" | "shaderpacks" | "saves";
+
+export const CONTENT_KINDS: ContentKind[] = [
+  "mods",
+  "resourcepacks",
+  "shaderpacks",
+  "saves",
+];
+
+/** jar 内解析出的 mod 元数据；解析不出来时为 null，UI 退回显示文件名。 */
+export interface ModMeta {
+  name: string;
+  id: string;
+  version: string;
+  loaders: string[];
+}
+
+export interface ContentItem {
+  kind: ContentKind;
+  fileName: string;
+  displayName: string;
+  size: number;
+  modifiedAt: number;
+  enabled: boolean;
+  meta: ModMeta | null;
+}
+
+export interface ContentStats {
+  kind: ContentKind;
+  total: number;
+  enabled: number;
+  bytes: number;
+}
+
+export interface ContentListing {
+  kind: ContentKind;
+  /** 内容目录绝对路径，交给 opener 插件的 revealItemInDir */
+  dir: string;
+  items: ContentItem[];
+  stats: ContentStats;
 }
 
 export interface JavaRuntime {
@@ -155,10 +226,18 @@ export interface GameExit {
   code: number | null;
 }
 
+/** 复制实例的进度（字节）。与下载进度分开：那边按文件计数，这边按字节。 */
+export interface CopyProgress {
+  slug: string;
+  copiedBytes: number;
+  totalBytes: number;
+}
+
 export const EVENTS = {
   progress: "compass://progress",
   gameLog: "compass://game-log",
   gameExit: "compass://game-exit",
+  copyProgress: "compass://copy-progress",
 } as const;
 
 /** Rust 侧 `Error` 序列化后的形状：`code` 用于本地化，`message` 只用于日志。 */
@@ -220,8 +299,26 @@ export const ipc = {
   instanceCreate: (slug: string, name: string, versionId: string) =>
     invoke<Instance>("instance_create", { slug, name, versionId }),
   instanceDelete: (slug: string) => invoke<void>("instance_delete", { slug }),
+  /** 保存实例设置；校验规则在 Rust 侧（内存/分辨率范围、空参数、换行） */
+  instanceUpdate: (slug: string, settings: InstanceSettings) =>
+    invoke<Instance>("instance_update", { slug, settings }),
+  /** 复制实例；进度经 EVENTS.copyProgress 推送 */
+  instanceDuplicate: (slug: string, newSlug: string, newName: string) =>
+    invoke<Instance>("instance_duplicate", { slug, newSlug, newName }),
   /** 这个实例会用哪个 Java；null = 没找到（此时启动会失败，UI 要提前说清楚） */
   instanceJava: (slug: string) => invoke<JavaRuntime | null>("instance_java", { slug }),
+
+  // ---- 实例内容（mods / 资源包 / 光影 / 存档）----
+  contentList: (slug: string, kind: ContentKind) =>
+    invoke<ContentListing>("content_list", { slug, kind }),
+  /** 只有 mods 支持启停：资源包/光影/存档的启用状态由游戏自己的配置文件决定 */
+  contentSetEnabled: (slug: string, fileName: string, enabled: boolean) =>
+    invoke<ContentItem>("content_set_enabled", { slug, fileName, enabled }),
+  /** sources 是原生文件选择器给的绝对路径 */
+  contentImport: (slug: string, kind: ContentKind, sources: string[]) =>
+    invoke<string[]>("content_import", { slug, kind, sources }),
+  contentRemove: (slug: string, kind: ContentKind, fileName: string) =>
+    invoke<void>("content_remove", { slug, kind, fileName }),
 
   // ---- 启动 ----
   instanceLaunch: (slug: string) => invoke<LaunchInfo>("instance_launch", { slug }),

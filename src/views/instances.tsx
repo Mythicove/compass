@@ -1,13 +1,16 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { open } from "@tauri-apps/plugin-dialog";
 import { errorKey, useI18n } from "../i18n";
 import {
   EVENTS,
   ipc,
   toIpcError,
+  type CopyProgress,
   type FileProgress,
   type GameExit,
   type Instance,
+  type InstanceSettings,
   type JavaRuntime,
   type ManifestEntry,
 } from "../lib/ipc";
@@ -27,7 +30,26 @@ function shortName(url: string): string {
   return last.length > 46 ? `…${last.slice(-46)}` : last;
 }
 
-export function InstancesView() {
+/** 实例 → 设置表单的初值。启动计数与最近启动时间不在表单里（Rust 侧维护）。 */
+function toSettings(inst: Instance): InstanceSettings {
+  return {
+    name: inst.name,
+    versionId: inst.versionId,
+    memoryMb: inst.memoryMb,
+    javaPath: inst.javaPath,
+    extraJvmArgs: inst.extraJvmArgs ?? [],
+    extraGameArgs: inst.extraGameArgs ?? [],
+    resolution: inst.resolution ?? null,
+    server: inst.server ?? null,
+    demo: inst.demo ?? false,
+  };
+}
+
+function mbOf(bytes: number): string {
+  return (bytes / 1024 / 1024).toFixed(1);
+}
+
+export function InstancesView({ onOpenContent }: { onOpenContent: (slug: string) => void }) {
   const { t } = useI18n();
   const [instances, setInstances] = useState<Instance[] | null>(null);
   const [installed, setInstalled] = useState<string[]>([]);
@@ -50,6 +72,14 @@ export function InstancesView() {
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState("");
   const [newVersion, setNewVersion] = useState("");
+
+  // 设置面板（一次只开一个：同时编辑两个实例的设置，保存时必然有一个是被旧值覆盖的）
+  const [editing, setEditing] = useState<string | null>(null);
+  const [form, setForm] = useState<InstanceSettings | null>(null);
+  // 复制进度（几个 GB 的实例要复制一会儿，没有反馈时看起来像卡死）
+  const [copying, setCopying] = useState<CopyProgress | null>(null);
+  const [dupOf, setDupOf] = useState<string | null>(null);
+  const [dupName, setDupName] = useState("");
 
   const reload = useCallback(async () => {
     const [list, ready, game] = await Promise.all([
@@ -93,6 +123,7 @@ export function InstancesView() {
         setRunning(null);
         void reload();
       }),
+      listen<CopyProgress>(EVENTS.copyProgress, (e) => setCopying(e.payload)),
     ];
     return () => {
       void Promise.all(un).then((fs) => fs.forEach((f) => f()));
@@ -149,7 +180,76 @@ export function InstancesView() {
       setNotice(t("instances.launched", { java: info.javaVersion }));
     });
 
-  const mb = done.bytes / 1024 / 1024;
+  const openSettings = (inst: Instance) => {
+    setNotice(null);
+    setError(null);
+    if (editing === inst.slug) {
+      setEditing(null);
+      setForm(null);
+      return;
+    }
+    setEditing(inst.slug);
+    setForm(toSettings(inst));
+  };
+
+  const patch = (p: Partial<InstanceSettings>) => setForm((f) => (f ? { ...f, ...p } : f));
+
+  /** 多行文本框 ↔ 参数数组：一行一个，空行在 Rust 侧被丢掉（这里不报错）。 */
+  const patchArgs = (key: "extraJvmArgs" | "extraGameArgs", text: string) =>
+    patch({ [key]: text.split("\n") } as Partial<InstanceSettings>);
+
+  const saveSettings = () =>
+    act(`${editing}:save`, async () => {
+      if (!editing || !form) return;
+      const saved = await ipc.instanceUpdate(editing, form);
+      setForm(toSettings(saved));
+      setNotice(t("instances.saved"));
+    });
+
+  const pickJava = () =>
+    act("pickJava", async () => {
+      const picked = await open({
+        multiple: false,
+        title: t("instances.javaPath"),
+        // 不限制扩展名：三平台的可执行文件名各不相同（java / java.exe / 无扩展名的 shim）
+      });
+      if (typeof picked !== "string") return;
+      patch({ javaPath: picked });
+      // 不在这里探测：表单还没保存，探测读的是磁盘上的旧值，报出来的版本会是上一次的
+      setNotice(t("instances.javaPicked", { path: picked }));
+    });
+
+  // 复制出的目录名要避开已有的实例，否则第二次复制必然撞上"already exists"。
+  const nextCopySlug = (slug: string) => {
+    const taken = new Set((instances ?? []).map((i) => i.slug));
+    let candidate = `${slug}-copy`;
+    for (let n = 2; taken.has(candidate); n += 1) candidate = `${slug}-copy-${n}`;
+    return candidate;
+  };
+
+  const duplicate = (inst: Instance) =>
+    act(`${inst.slug}:duplicate`, async () => {
+      setCopying(null);
+      const copy = await ipc.instanceDuplicate(
+        inst.slug,
+        nextCopySlug(inst.slug),
+        dupName.trim(),
+      );
+      setDupOf(null);
+      setDupName("");
+      setCopying(null);
+      setNotice(t("instances.duplicated", { name: copy.name }));
+    });
+
+  const removeInstance = (inst: Instance) =>
+    act(`${inst.slug}:delete`, async () => {
+      if (!window.confirm(t("instances.deleteConfirm", { name: inst.name }))) return;
+      await ipc.instanceDelete(inst.slug);
+      if (editing === inst.slug) {
+        setEditing(null);
+        setForm(null);
+      }
+    });
 
   return (
     <div className="stack">
@@ -172,10 +272,15 @@ export function InstancesView() {
             {busy.endsWith(":install")
               ? t("instances.downloading", {
                   files: done.files.size,
-                  mb: mb.toFixed(1),
+                  mb: mbOf(done.bytes),
                   current: done.current,
                 })
-              : t("instances.working")}
+              : copying
+                ? t("instances.duplicating", {
+                    mb: mbOf(copying.copiedBytes),
+                    total: mbOf(copying.totalBytes),
+                  })
+                : t("instances.working")}
           </p>
         )}
 
@@ -234,6 +339,8 @@ export function InstancesView() {
         const ready = installed.includes(inst.versionId);
         const isRunning = running === inst.slug;
         const runtime = java[inst.slug];
+        const isEditing = editing === inst.slug;
+        const isDuplicating = dupOf === inst.slug;
         return (
           <section key={inst.slug} className="card">
             <div className="row between">
@@ -277,14 +384,285 @@ export function InstancesView() {
                     {busy === `${inst.slug}:launch` ? "…" : t("instances.launch")}
                   </button>
                 )}
-                <button type="button" className="link" disabled={busy !== null} onClick={() => void act(`${inst.slug}:delete`, async () => { await ipc.instanceDelete(inst.slug); })}>
+                <button type="button" className="link" onClick={() => onOpenContent(inst.slug)}>
+                  {t("instances.content")}
+                </button>
+                <button
+                  type="button"
+                  className="link"
+                  disabled={busy !== null}
+                  onClick={() => openSettings(inst)}
+                >
+                  {t("instances.settings")}
+                </button>
+                <button
+                  type="button"
+                  className="link"
+                  disabled={busy !== null || isRunning}
+                  onClick={() => {
+                    setDupOf(isDuplicating ? null : inst.slug);
+                    setDupName(isDuplicating ? "" : `${inst.name} copy`);
+                  }}
+                >
+                  {t("instances.duplicate")}
+                </button>
+                <button
+                  type="button"
+                  className="link"
+                  disabled={busy !== null || isRunning}
+                  onClick={() => void removeInstance(inst)}
+                >
                   {t("instances.delete")}
                 </button>
               </div>
             </div>
+
+            {isDuplicating && (
+              <div className="row sub">
+                <label className="field inline">
+                  <span>{t("instances.duplicateName")}</span>
+                  <input
+                    value={dupName}
+                    onChange={(e) => setDupName(e.target.value)}
+                    placeholder={`${inst.name} copy`}
+                  />
+                </label>
+                <button
+                  type="button"
+                  disabled={busy !== null}
+                  onClick={() => void duplicate(inst)}
+                >
+                  {busy === `${inst.slug}:duplicate` ? "…" : t("instances.duplicate")}
+                </button>
+                <button type="button" className="link" onClick={() => setDupOf(null)}>
+                  {t("common.cancel")}
+                </button>
+                <span className="muted small">→ {nextCopySlug(inst.slug)}</span>
+              </div>
+            )}
+
+            {isEditing && form && (
+              <SettingsPanel
+                form={form}
+                installed={installed}
+                versions={versions}
+                saving={busy === `${inst.slug}:save`}
+                onChange={patch}
+                onArgsChange={patchArgs}
+                onPickJava={() => void pickJava()}
+                onSave={() => void saveSettings()}
+                onClose={() => {
+                  setEditing(null);
+                  setForm(null);
+                }}
+              />
+            )}
           </section>
         );
       })}
+    </div>
+  );
+}
+
+interface SettingsPanelProps {
+  form: InstanceSettings;
+  installed: string[];
+  versions: ManifestEntry[];
+  saving: boolean;
+  onChange: (p: Partial<InstanceSettings>) => void;
+  onArgsChange: (key: "extraJvmArgs" | "extraGameArgs", text: string) => void;
+  onPickJava: () => void;
+  onSave: () => void;
+  onClose: () => void;
+}
+
+/** 实例设置。校验规则在 Rust 侧（`instance::sanitize_settings`），这里只做输入。 */
+function SettingsPanel({
+  form,
+  installed,
+  versions,
+  saving,
+  onChange,
+  onArgsChange,
+  onPickJava,
+  onSave,
+  onClose,
+}: SettingsPanelProps) {
+  const { t } = useI18n();
+  // 已装的排前面：那才是能直接启动的选项
+  const known = useMemo(() => {
+    const rest = versions.map((v) => v.id).filter((id) => !installed.includes(id));
+    return [...installed, ...rest];
+  }, [installed, versions]);
+
+  return (
+    <div className="stack sub">
+      <h3>{t("instances.settingsTitle")}</h3>
+      <div className="grid-2">
+        <label className="field">
+          <span>{t("instances.name")}</span>
+          <input
+            value={form.name}
+            onChange={(e) => onChange({ name: e.target.value })}
+          />
+        </label>
+        <label className="field">
+          <span>{t("instances.version")}</span>
+          <input
+            value={form.versionId}
+            list="compass-known-versions"
+            onChange={(e) => onChange({ versionId: e.target.value })}
+          />
+        </label>
+        <label className="field">
+          <span>{t("instances.memoryMb")}</span>
+          <input
+            type="number"
+            min={512}
+            step={512}
+            value={form.memoryMb ?? ""}
+            onChange={(e) =>
+              onChange({ memoryMb: e.target.value === "" ? null : Number(e.target.value) })
+            }
+          />
+        </label>
+        <label className="field">
+          <span>{t("instances.javaPath")}</span>
+          <span className="row">
+            <input
+              value={form.javaPath ?? ""}
+              placeholder="—"
+              onChange={(e) => onChange({ javaPath: e.target.value || null })}
+            />
+            <button type="button" onClick={onPickJava}>
+              {t("instances.pickJava")}
+            </button>
+          </span>
+        </label>
+      </div>
+      <datalist id="compass-known-versions">
+        {known.map((id) => (
+          <option key={id} value={id} />
+        ))}
+      </datalist>
+
+      <div className="grid-2">
+        <label className="field">
+          <span>{t("instances.extraJvm")}</span>
+          <textarea
+            rows={3}
+            value={form.extraJvmArgs.join("\n")}
+            onChange={(e) => onArgsChange("extraJvmArgs", e.target.value)}
+          />
+        </label>
+        <label className="field">
+          <span>{t("instances.extraGame")}</span>
+          <textarea
+            rows={3}
+            value={form.extraGameArgs.join("\n")}
+            onChange={(e) => onArgsChange("extraGameArgs", e.target.value)}
+          />
+        </label>
+      </div>
+      <p className="muted small">{t("instances.argsHint")}</p>
+
+      <label className="check">
+        <input
+          type="checkbox"
+          checked={form.resolution !== null}
+          onChange={(e) =>
+            onChange({
+              resolution: e.target.checked ? { width: 1920, height: 1080 } : null,
+            })
+          }
+        />
+        <span>{t("instances.resolution")}</span>
+      </label>
+      {form.resolution && (
+        <div className="row sub">
+          <label className="field inline">
+            <span>{t("instances.width")}</span>
+            <input
+              type="number"
+              min={160}
+              value={form.resolution.width}
+              onChange={(e) =>
+                onChange({ resolution: { ...form.resolution!, width: Number(e.target.value) } })
+              }
+            />
+          </label>
+          <label className="field inline">
+            <span>{t("instances.height")}</span>
+            <input
+              type="number"
+              min={160}
+              value={form.resolution.height}
+              onChange={(e) =>
+                onChange({ resolution: { ...form.resolution!, height: Number(e.target.value) } })
+              }
+            />
+          </label>
+        </div>
+      )}
+      {!form.resolution && <p className="muted small">{t("instances.resolutionAuto")}</p>}
+
+      <label className="check">
+        <input
+          type="checkbox"
+          checked={form.server !== null}
+          onChange={(e) =>
+            onChange({ server: e.target.checked ? { host: "", port: null } : null })
+          }
+        />
+        <span>{t("instances.server")}</span>
+      </label>
+      {form.server && (
+        <div className="row sub">
+          <label className="field inline grow">
+            <span>{t("instances.serverHost")}</span>
+            <input
+              value={form.server.host}
+              placeholder="play.example.com"
+              onChange={(e) => onChange({ server: { ...form.server!, host: e.target.value } })}
+            />
+          </label>
+          <label className="field inline">
+            <span>{t("instances.serverPort")}</span>
+            <input
+              type="number"
+              min={1}
+              max={65535}
+              value={form.server.port ?? ""}
+              onChange={(e) =>
+                onChange({
+                  server: {
+                    ...form.server!,
+                    port: e.target.value === "" ? null : Number(e.target.value),
+                  },
+                })
+              }
+            />
+          </label>
+        </div>
+      )}
+
+      <label className="check">
+        <input
+          type="checkbox"
+          checked={form.demo}
+          onChange={(e) => onChange({ demo: e.target.checked })}
+        />
+        <span>{t("instances.demo")}</span>
+      </label>
+
+      <div className="row">
+        <button type="button" disabled={saving} onClick={onSave}>
+          {saving ? "…" : t("instances.save")}
+        </button>
+        <button type="button" className="link" onClick={onClose}>
+          {t("common.cancel")}
+        </button>
+      </div>
     </div>
   );
 }

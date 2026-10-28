@@ -12,12 +12,12 @@ import {
 } from "./lib/ipc";
 import { HomeView } from "./views/home";
 import { InstancesView } from "./views/instances";
-import { ModsView } from "./views/mods";
+import { ContentView } from "./views/content";
 import { SettingsView } from "./views/settings";
 import { LogsView } from "./views/logs";
 import "./App.css";
 
-type View = "home" | "instances" | "mods" | "logs" | "settings";
+type View = "home" | "instances" | "content" | "logs" | "settings";
 
 // 游戏日志的模块级环形缓冲：订阅在 App 挂载就开始，早于用户打开日志页——
 // 否则启动头几秒的输出（往往正是崩溃原因）会丢。
@@ -64,7 +64,7 @@ export function useGameLogs(): GameLogsSnapshot {
 const VIEWS: { id: View; labelKey: string }[] = [
   { id: "home", labelKey: "nav.home" },
   { id: "instances", labelKey: "nav.instances" },
-  { id: "mods", labelKey: "nav.mods" },
+  { id: "content", labelKey: "nav.content" },
   { id: "logs", labelKey: "nav.logs" },
   { id: "settings", labelKey: "nav.settings" },
 ];
@@ -103,6 +103,8 @@ function useTheme(theme: Config["theme"] | undefined) {
 function Shell() {
   const { t } = useI18n();
   const [view, setView] = useState<View>("home");
+  // 从实例页点「内容」跳过来时带上是哪个实例；直接点侧栏时为空，由内容页自己选。
+  const [contentSlug, setContentSlug] = useState("");
   const [account, setAccount] = useState<AccountView | null>(null);
   const [checking, setChecking] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -185,8 +187,15 @@ function Shell() {
         {view === "home" && (
           <HomeView account={account} checking={checking} onSignIn={signIn} />
         )}
-        {view === "instances" && <InstancesView />}
-        {view === "mods" && <ModsView />}
+        {view === "instances" && (
+          <InstancesView
+            onOpenContent={(slug) => {
+              setContentSlug(slug);
+              setView("content");
+            }}
+          />
+        )}
+        {view === "content" && <ContentView initialSlug={contentSlug} />}
         {view === "logs" && <LogsView />}
         {view === "settings" && <SettingsView />}
       </main>
