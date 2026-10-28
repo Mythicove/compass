@@ -87,14 +87,17 @@ export interface SearchResult<T> {
   total_hits: number;
 }
 
-/** 版本清单条目（piston-meta）。 */
+/** 版本清单条目（piston-meta）。字段与 Rust 侧 `meta::ManifestEntry` 一一对应，
+ *  两边由 tests/shape_contract.rs 比对——改一边不改另一边会在那里失败。 */
 export interface ManifestEntry {
   id: string;
+  /** Rust 侧字段名是 `kind`，序列化成 `type`（`type` 是 TS 关键字，但作为属性名合法） */
   type: string;
   url: string;
   time: string;
   releaseTime: string;
   sha1?: string;
+  complianceLevel: number;
 }
 
 export interface DownloadSummary {

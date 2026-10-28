@@ -12,19 +12,14 @@
 //! 这里同时要求 **每个命令都被前端调用**：启动器没有别的消费者，
 //! 一个没有调用方的命令就是一个没有验证过的命令。要么这一步就接上 UI，
 //! 要么先别加（等它的使用者一起落地）。
+//!
+//! 载荷的**字段名**是另一份同类契约，见 `shape_contract.rs`。
+
+mod common;
 
 use std::collections::BTreeSet;
-use std::fs;
-use std::path::PathBuf;
 
-fn root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-}
-
-fn read(rel: &str) -> String {
-    let p = root().join(rel);
-    fs::read_to_string(&p).unwrap_or_else(|e| panic!("cannot read {}: {e}", p.display()))
-}
+use common::{find_from, read, skip_balanced, skip_ws, strip_ts_comments};
 
 /// `pub async fn NAME(` 里的 NAME。
 fn defined_commands() -> BTreeSet<String> {
@@ -54,13 +49,6 @@ fn registered_commands() -> BTreeSet<String> {
         .collect()
 }
 
-/// `invoke<T>("NAME"` 里的 NAME。
-///
-/// 只认**调用形式**：`invoke` 后面（跳过空白与配平的泛型尖括号）必须紧跟 `(`，
-/// 再跟一个字符串字面量。否则 `import { invoke } from "@tauri-apps/api/core"`
-/// 这种地方会被当成一次调用——第一版就是这么错的，抓出来两个不存在的命令名。
-/// 注释先整体剥掉：被注释掉的调用不算调用方。全文扫描而非逐行，
-/// 泛型或参数换行的写法同样是合法调用，不该让这道门误报。
 fn invoked_commands() -> BTreeSet<String> {
     parse_invoked(&read("../src/lib/ipc.ts"))
 }
@@ -68,7 +56,10 @@ fn invoked_commands() -> BTreeSet<String> {
 /// 解析器单独可测：一道会误报的门很快就会被下一个人删掉，
 /// 一道会漏报的门比没有门更糟（绿灯变成假信号）。
 fn parse_invoked(text: &str) -> BTreeSet<String> {
-    let chars = strip_comments(text);
+    // 只认**调用形式**：`invoke` 后面（跳过空白与配平的泛型尖括号）必须紧跟 `(`，
+    // 再跟一个字符串字面量。否则 `import { invoke } from "@tauri-apps/api/core"`
+    // 会被当成一次调用——第一版就是这么错的，抓出来两个不存在的命令名。
+    let chars = strip_ts_comments(text);
     let mut out = BTreeSet::new();
     let mut i = 0;
     while let Some(found) = find_from(&chars, "invoke", i) {
@@ -103,94 +94,6 @@ fn parse_invoked(text: &str) -> BTreeSet<String> {
         i = j;
     }
     out
-}
-
-/// 去掉 `//` 行注释与 `/* */` 块注释。字符串与模板字面量里的 `//` 不算注释
-/// （否则 URL 会把后面的代码整段吃掉）。
-fn strip_comments(text: &str) -> Vec<char> {
-    let src: Vec<char> = text.chars().collect();
-    let mut out = Vec::with_capacity(src.len());
-    let mut i = 0;
-    while i < src.len() {
-        let c = src[i];
-        if c == '"' || c == '\'' || c == '`' {
-            let quote = c;
-            out.push(c);
-            i += 1;
-            while i < src.len() {
-                out.push(src[i]);
-                if src[i] == '\\' {
-                    i += 1;
-                    if i < src.len() {
-                        out.push(src[i]);
-                    }
-                } else if src[i] == quote {
-                    i += 1;
-                    break;
-                }
-                i += 1;
-            }
-            continue;
-        }
-        if c == '/' && i + 1 < src.len() {
-            match src[i + 1] {
-                '/' => {
-                    while i < src.len() && src[i] != '\n' {
-                        i += 1;
-                    }
-                    continue;
-                }
-                '*' => {
-                    i += 2;
-                    while i + 1 < src.len() && !(src[i] == '*' && src[i + 1] == '/') {
-                        i += 1;
-                    }
-                    i = (i + 2).min(src.len());
-                    out.push(' ');
-                    continue;
-                }
-                _ => {}
-            }
-        }
-        out.push(c);
-        i += 1;
-    }
-    out
-}
-
-fn find_from(chars: &[char], needle: &str, from: usize) -> Option<usize> {
-    let n: Vec<char> = needle.chars().collect();
-    if n.is_empty() || from + n.len() > chars.len() {
-        return None;
-    }
-    (from..=chars.len() - n.len()).find(|&i| chars[i..i + n.len()] == n[..])
-}
-
-fn skip_ws(chars: &[char], i: &mut usize) {
-    while *i < chars.len() && chars[*i].is_whitespace() {
-        *i += 1;
-    }
-}
-
-/// 跳过一对配平的分隔符（泛型里的 `SearchResult<HoardProject>` 有嵌套）。
-/// 返回 false 表示没有找到闭合，这次匹配作废。
-fn skip_balanced(chars: &[char], i: &mut usize, open: char, close: char) -> bool {
-    let mut depth = 0usize;
-    while *i < chars.len() {
-        match chars[*i] {
-            c if c == open => depth += 1,
-            c if c == close => {
-                depth -= 1;
-                if depth == 0 {
-                    *i += 1;
-                    return true;
-                }
-            }
-            _ => {}
-        }
-        *i += 1;
-    }
-    false
 }
 
 fn diff(a: &BTreeSet<String>, b: &BTreeSet<String>) -> Vec<String> {
