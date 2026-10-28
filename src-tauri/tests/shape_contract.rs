@@ -26,9 +26,10 @@ struct Shape {
 
 /// 所有可能跨 IPC 的 Rust 结构体所在的文件。漏一个文件 = 那个文件里的结构体不被检查，
 /// 所以 `every_listed_rust_file_is_parsed` 会盯着这份清单本身。
-const RUST_FILES: [&str; 13] = [
+const RUST_FILES: [&str; 14] = [
     "src/account.rs",
     "src/api.rs",
+    "src/archive.rs",
     "src/commands.rs",
     "src/config.rs",
     "src/content.rs",
@@ -53,8 +54,9 @@ const ALIASES: [(&str, &str); 6] = [
 ];
 
 /// 必须被比对到的形状。少了这条，某次重命名会让一个载荷悄悄从门里消失。
-const MUST_COMPARE: [&str; 22] = [
+const MUST_COMPARE: [&str; 24] = [
     "AccountView",
+    "ArchiveInfo",
     "Config",
     "ContentItem",
     "ContentListing",
@@ -76,6 +78,7 @@ const MUST_COMPARE: [&str; 22] = [
     "Resolution",
     "ServerJoin",
     "Summary",
+    "ZipSummary",
 ];
 
 fn rust_shapes() -> BTreeMap<String, Shape> {

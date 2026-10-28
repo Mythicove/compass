@@ -522,3 +522,16 @@ textarea {
   font-size: 12px;
   resize: vertical;
 }
+
+/* 导入前的"这个包会执行什么"清单：这是安全提示，不是普通列表，要显眼 */
+.audit {
+  margin: 8px 0 0;
+  padding-left: 20px;
+  color: var(--text);
+}
+
+.audit li {
+  margin: 2px 0;
+  font-family: var(--font-mono);
+  word-break: break-all;
+}

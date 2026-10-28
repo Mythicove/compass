@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import { errorKey, useI18n } from "../i18n";
 import {
   EVENTS,
   ipc,
   toIpcError,
+  type ArchiveInfo,
   type CopyProgress,
   type FileProgress,
   type GameExit,
@@ -80,6 +81,12 @@ export function InstancesView({ onOpenContent }: { onOpenContent: (slug: string)
   const [copying, setCopying] = useState<CopyProgress | null>(null);
   const [dupOf, setDupOf] = useState<string | null>(null);
   const [dupName, setDupName] = useState("");
+  // 导出面板（要不要带存档得先问清楚：存档通常是实例里最大的部分，也是本人的进度）
+  const [exportOf, setExportOf] = useState<string | null>(null);
+  const [exportSaves, setExportSaves] = useState(true);
+  // 导入确认：先只读压缩包里的 instance.json（不落盘），把会影响启动的内容摊开给用户看
+  const [importInfo, setImportInfo] = useState<{ path: string; info: ArchiveInfo } | null>(null);
+  const [importName, setImportName] = useState("");
 
   const reload = useCallback(async () => {
     const [list, ready, game] = await Promise.all([
@@ -219,11 +226,12 @@ export function InstancesView({ onOpenContent }: { onOpenContent: (slug: string)
       setNotice(t("instances.javaPicked", { path: picked }));
     });
 
-  // 复制出的目录名要避开已有的实例，否则第二次复制必然撞上"already exists"。
-  const nextCopySlug = (slug: string) => {
+  // 新目录名要避开已有实例，否则第二次复制/导入必然撞上"already exists"。
+  const uniqueSlug = (base: string) => {
     const taken = new Set((instances ?? []).map((i) => i.slug));
-    let candidate = `${slug}-copy`;
-    for (let n = 2; taken.has(candidate); n += 1) candidate = `${slug}-copy-${n}`;
+    if (!taken.has(base)) return base;
+    let candidate = `${base}-2`;
+    for (let n = 3; taken.has(candidate); n += 1) candidate = `${base}-${n}`;
     return candidate;
   };
 
@@ -232,13 +240,58 @@ export function InstancesView({ onOpenContent }: { onOpenContent: (slug: string)
       setCopying(null);
       const copy = await ipc.instanceDuplicate(
         inst.slug,
-        nextCopySlug(inst.slug),
+        uniqueSlug(`${inst.slug}-copy`),
         dupName.trim(),
       );
       setDupOf(null);
       setDupName("");
       setCopying(null);
       setNotice(t("instances.duplicated", { name: copy.name }));
+    });
+
+  const exportInstance = (inst: Instance) =>
+    act(`${inst.slug}:export`, async () => {
+      const dest = await save({
+        defaultPath: `${inst.slug}.zip`,
+        filters: [{ name: "Compass instance (.zip)", extensions: ["zip"] }],
+        title: t("instances.export"),
+      });
+      if (!dest) return;
+      const summary = await ipc.instanceExport(inst.slug, dest, exportSaves);
+      setExportOf(null);
+      setNotice(
+        t("instances.exported", {
+          files: summary.files,
+          mb: mbOf(summary.bytes),
+          path: dest,
+        }),
+      );
+    });
+
+  /** 第一步：选包 + 只读地看一眼。看完才谈导入。 */
+  const pickImport = () =>
+    act("import:pick", async () => {
+      const picked = await open({
+        multiple: false,
+        title: t("instances.import"),
+        filters: [{ name: "Compass instance (.zip)", extensions: ["zip"] }],
+      });
+      if (typeof picked !== "string") return;
+      const info = await ipc.instanceInspectArchive(picked);
+      setImportInfo({ path: picked, info });
+      setImportName(info.name);
+    });
+
+  /** 第二步：用户看过内容并确认之后才解压落盘。 */
+  const doImport = () =>
+    act("import:run", async () => {
+      if (!importInfo) return;
+      const name = importName.trim();
+      const slug = uniqueSlug(toSlug(name || importInfo.info.name));
+      const inst = await ipc.instanceImport(importInfo.path, slug, name);
+      setImportInfo(null);
+      setImportName("");
+      setNotice(t("instances.imported", { name: inst.name }));
     });
 
   const removeInstance = (inst: Instance) =>
@@ -256,9 +309,14 @@ export function InstancesView({ onOpenContent }: { onOpenContent: (slug: string)
       <section className="card">
         <div className="row between">
           <h2>{t("nav.instances")}</h2>
-          <button type="button" onClick={() => setCreating((v) => !v)}>
-            {creating ? t("common.cancel") : t("instances.new")}
-          </button>
+          <div className="row">
+            <button type="button" className="link" onClick={() => void pickImport()}>
+              {busy === "import:pick" ? "…" : t("instances.import")}
+            </button>
+            <button type="button" onClick={() => setCreating((v) => !v)}>
+              {creating ? t("common.cancel") : t("instances.new")}
+            </button>
+          </div>
         </div>
 
         {error && (
@@ -333,6 +391,72 @@ export function InstancesView({ onOpenContent }: { onOpenContent: (slug: string)
         )}
       </section>
 
+
+      {importInfo && (
+        <section className="card warn">
+          <h2>{t("instances.importTitle")}</h2>
+          <p className="muted small">
+            {t("instances.importArchive", {
+              name: importInfo.info.name,
+              version: importInfo.info.versionId,
+              files: importInfo.info.files,
+              mb: mbOf(importInfo.info.bytes),
+            })}
+          </p>
+          <p className="small">{t("instances.importWarning")}</p>
+          <ul className="small audit">
+            {importInfo.info.extraJvmArgs.length > 0 && (
+              <li>{t("instances.importJvm", { args: importInfo.info.extraJvmArgs.join(" ") })}</li>
+            )}
+            {importInfo.info.extraGameArgs.length > 0 && (
+              <li>{t("instances.importGame", { args: importInfo.info.extraGameArgs.join(" ") })}</li>
+            )}
+            {importInfo.info.hadCustomJava && <li>{t("instances.importJava")}</li>}
+            {importInfo.info.server && (
+              <li>
+                {t("instances.importServer", {
+                  host: `${importInfo.info.server.host}${
+                    importInfo.info.server.port ? `:${importInfo.info.server.port}` : ""
+                  }`,
+                })}
+              </li>
+            )}
+            {importInfo.info.demo && <li>{t("instances.importDemo")}</li>}
+            {importInfo.info.extraJvmArgs.length === 0 &&
+              importInfo.info.extraGameArgs.length === 0 &&
+              !importInfo.info.hadCustomJava &&
+              !importInfo.info.server &&
+              !importInfo.info.demo && <li>{t("instances.importClean")}</li>}
+          </ul>
+          <div className="row sub">
+            <label className="field inline grow">
+              <span>{t("instances.name")}</span>
+              <input value={importName} onChange={(e) => setImportName(e.target.value)} />
+            </label>
+            <button
+              type="button"
+              disabled={busy !== null || !importName.trim()}
+              onClick={() => void doImport()}
+            >
+              {busy === "import:run" ? "…" : t("instances.importConfirm")}
+            </button>
+            <button
+              type="button"
+              className="link"
+              onClick={() => {
+                setImportInfo(null);
+                setImportName("");
+              }}
+            >
+              {t("common.cancel")}
+            </button>
+            <span className="muted small">
+              → {uniqueSlug(toSlug(importName.trim() || importInfo.info.name))}
+            </span>
+          </div>
+        </section>
+      )}
+
       {instances && instances.length === 0 && <p className="muted">{t("instances.empty")}</p>}
 
       {instances?.map((inst) => {
@@ -341,6 +465,7 @@ export function InstancesView({ onOpenContent }: { onOpenContent: (slug: string)
         const runtime = java[inst.slug];
         const isEditing = editing === inst.slug;
         const isDuplicating = dupOf === inst.slug;
+        const exporting = exportOf === inst.slug;
         return (
           <section key={inst.slug} className="card">
             <div className="row between">
@@ -410,6 +535,14 @@ export function InstancesView({ onOpenContent }: { onOpenContent: (slug: string)
                   type="button"
                   className="link"
                   disabled={busy !== null || isRunning}
+                  onClick={() => setExportOf(exporting ? null : inst.slug)}
+                >
+                  {t("instances.export")}
+                </button>
+                <button
+                  type="button"
+                  className="link"
+                  disabled={busy !== null || isRunning}
                   onClick={() => void removeInstance(inst)}
                 >
                   {t("instances.delete")}
@@ -437,7 +570,33 @@ export function InstancesView({ onOpenContent }: { onOpenContent: (slug: string)
                 <button type="button" className="link" onClick={() => setDupOf(null)}>
                   {t("common.cancel")}
                 </button>
-                <span className="muted small">→ {nextCopySlug(inst.slug)}</span>
+                <span className="muted small">→ {uniqueSlug(`${inst.slug}-copy`)}</span>
+              </div>
+            )}
+
+            {exporting && (
+              <div className="stack sub">
+                <label className="check">
+                  <input
+                    type="checkbox"
+                    checked={exportSaves}
+                    onChange={(e) => setExportSaves(e.target.checked)}
+                  />
+                  <span>{t("instances.exportWithSaves")}</span>
+                </label>
+                <p className="muted small">{t("instances.exportHint")}</p>
+                <div className="row">
+                  <button
+                    type="button"
+                    disabled={busy !== null}
+                    onClick={() => void exportInstance(inst)}
+                  >
+                    {busy === `${inst.slug}:export` ? "…" : t("instances.export")}
+                  </button>
+                  <button type="button" className="link" onClick={() => setExportOf(null)}>
+                    {t("common.cancel")}
+                  </button>
+                </div>
               </div>
             )}
 

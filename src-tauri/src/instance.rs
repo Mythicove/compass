@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::archive::{SKIP_DIRS, skip_file};
 use crate::error::Error;
 use crate::launch::ServerJoin;
 use crate::paths::Paths;
@@ -274,15 +275,10 @@ pub fn settings_of(inst: &Instance) -> InstanceSettings {
 // 复制
 // ---------------------------------------------------------------------------
 
-/// 复制实例时跳过的目录：都是每次启动重建或纯噪音的东西。
-/// `natives` 每次启动前清空重建（见 `natives_dir`），带上它只会让复制变慢。
-const COPY_SKIP_DIRS: [&str; 4] = ["natives", "logs", "crash-reports", "quickPlay"];
-
-fn copy_skip_file(name: &str) -> bool {
-    name.starts_with("hs_err_pid") || name.ends_with(".tmp") || name == ".DS_Store"
-}
-
 /// 复制出一个新实例（做变体、留档、把整合包分给别人之前先试一遍）。
+///
+/// 跳过哪些目录由 `archive::SKIP_DIRS` 定义——导出实例必须给出同一个答案，
+/// 否则"复制出来的实例"与"导出再导入的实例"不一样。
 ///
 /// 计数与"最近启动"归零：新实例还没被启动过，继承一个假的启动时间会让列表排序骗人。
 /// `progress` 每复制完一个文件回调一次（已复制字节, 总字节），UI 据此显示进度条——
@@ -350,10 +346,10 @@ fn dir_bytes(root: &Path) -> u64 {
                 continue;
             }
             if ft.is_dir() {
-                if !COPY_SKIP_DIRS.contains(&name.as_str()) {
+                if !SKIP_DIRS.contains(&name.as_str()) {
                     stack.push(e.path());
                 }
-            } else if !copy_skip_file(&name) {
+            } else if !skip_file(&name) {
                 total += e.metadata().map(|m| m.len()).unwrap_or(0);
             }
         }
@@ -361,7 +357,7 @@ fn dir_bytes(root: &Path) -> u64 {
     total
 }
 
-/// 递归拷贝一棵目录树，跳过 `COPY_SKIP_DIRS` 与临时文件。
+/// 递归拷贝一棵目录树，跳过 `SKIP_DIRS` 与临时文件。
 ///
 /// 实例复制与"导入存档文件夹"共用这一份实现：两套树拷贝迟早会在
 /// 符号链接、跳过规则这些细节上分岔，而分岔的那一半通常没人测。
@@ -379,17 +375,139 @@ where
         }
         let to = dst.join(&name);
         if ft.is_dir() {
-            if COPY_SKIP_DIRS.contains(&name.as_str()) {
+            if SKIP_DIRS.contains(&name.as_str()) {
                 continue;
             }
             std::fs::create_dir_all(&to)?;
             copy_tree(&e.path(), &to, on_file)?;
-        } else if !copy_skip_file(&name) {
+        } else if !skip_file(&name) {
             std::fs::copy(e.path(), &to)?;
             on_file(std::fs::metadata(&to).map(|m| m.len()).unwrap_or(0));
         }
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 导出 / 导入
+// ---------------------------------------------------------------------------
+
+/// 导出包里实例配置的固定位置（根目录）。
+///
+/// 只认这一个位置：压缩包可能把整个实例裹在一层顶层目录里，"找一找再拍平"
+/// 是要靠猜的启发式。第三方整合包格式（mrpack / CurseForge）是 P3 的活，
+/// 各有各的安装器，不在这里兼容。
+const EXPORTED_CONFIG: &str = "instance.json";
+
+/// 导出实例为 zip。返回写进去的文件数与字节数。
+///
+/// `include_saves = false` 用于"把实例分享出去但不带自己的世界"：
+/// 存档通常是实例里最大的部分，而且是**本人的进度**，默认塞进分享包并不合适。
+pub fn export(
+    paths: &Paths,
+    slug: &str,
+    dest: &Path,
+    include_saves: bool,
+) -> Result<crate::archive::ZipSummary, Error> {
+    let src = instance_dir(paths, slug)?;
+    if !src.is_dir() {
+        return Err(Error::NotFound(format!("instance {slug} does not exist")));
+    }
+    // 目标不能在被打包的目录里：否则边写边读，包会一路长到自己把自己吃进去
+    if dest.starts_with(&src) {
+        return Err(Error::Invalid(format!(
+            "refusing to export into the instance itself: {}",
+            dest.display()
+        )));
+    }
+    let extra: &[&str] = if include_saves { &[] } else { &["saves"] };
+    crate::archive::zip_dir(&src, dest, extra)
+}
+
+/// 导入前的"看一眼"：只读压缩包里的 `instance.json`，**不落盘任何东西**。
+///
+/// 这一步不是装饰。实例配置里有 `java_path` 与自定义 JVM 参数，
+/// 而"一个配置文件能决定启动哪个可执行文件、带什么参数"就是任意命令执行——
+/// 正是 P0 删掉 `launch(program, args)` 的理由。导入别人的包等于把那个能力
+/// 从数据文件放回来，所以必须让用户在东西落盘之前看见它带了什么。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveInfo {
+    pub name: String,
+    pub version_id: String,
+    pub memory_mb: Option<u32>,
+    pub files: usize,
+    pub bytes: u64,
+    /// 会影响启动行为的内容，UI 必须原样摊开给用户看
+    pub extra_jvm_args: Vec<String>,
+    pub extra_game_args: Vec<String>,
+    pub server: Option<ServerJoin>,
+    pub demo: bool,
+    /// 包里写了自定义 Java 路径（来自别的机器，导入时会被清空，见 `import`）
+    pub had_custom_java: bool,
+}
+
+pub fn inspect_archive(archive_path: &Path) -> Result<ArchiveInfo, Error> {
+    let Some(text) = crate::archive::read_text_entry(archive_path, EXPORTED_CONFIG)? else {
+        return Err(Error::Invalid(format!(
+            "{} is not a Compass instance export: no {EXPORTED_CONFIG} at its root",
+            archive_path.display()
+        )));
+    };
+    let inst: Instance = serde_json::from_str(&text)
+        .map_err(|e| Error::Config(format!("{EXPORTED_CONFIG} is not readable: {e}")))?;
+    let (files, bytes) = crate::archive::entries_summary(archive_path)?;
+    Ok(ArchiveInfo {
+        name: inst.name,
+        version_id: inst.version_id,
+        memory_mb: inst.memory_mb,
+        files,
+        bytes,
+        extra_jvm_args: inst.extra_jvm_args,
+        extra_game_args: inst.extra_game_args,
+        server: inst.server,
+        demo: inst.demo,
+        had_custom_java: inst.java_path.is_some(),
+    })
+}
+
+/// 导入一个实例导出包。
+///
+/// **slug 由调用方给，绝不取自压缩包**：包里的 slug 是别人机器上的目录名，
+/// 让它决定本地路径等于让一个外部文件决定我们往哪写。
+pub fn import(
+    paths: &Paths,
+    archive_path: &Path,
+    slug: &str,
+    name: &str,
+) -> Result<Instance, Error> {
+    let dst = instance_dir(paths, slug)?;
+    if dst.exists() {
+        return Err(Error::Invalid(format!("instance already exists: {slug}")));
+    }
+    // 先确认这确实是一个实例包，再解压：反过来会留下一个解压到一半的目录
+    let info = inspect_archive(archive_path)?;
+    std::fs::create_dir_all(&dst)?;
+    // 解压失败时不留半个实例：要么完整可用，要么不存在
+    if let Err(e) = crate::archive::unzip_to(archive_path, &dst) {
+        let _ = std::fs::remove_dir_all(&dst);
+        return Err(e);
+    }
+    let mut inst = load(paths, slug)?;
+    let trimmed = name.trim();
+    if !trimmed.is_empty() {
+        inst.name = trimmed.to_string();
+    } else if inst.name.trim().is_empty() {
+        inst.name = info.name;
+    }
+    // 自定义 Java 路径来自**别的机器**，在这台机器上几乎必然不存在；
+    // 留着它只会让第一次启动报一句指向别人硬盘的错误。清空 = 回到按版本要求自动探测。
+    inst.java_path = None;
+    inst.created_at = crate::account::now_unix();
+    inst.last_launched_at = None;
+    inst.launches = 0;
+    save(paths, &inst)?;
+    Ok(inst)
 }
 
 #[cfg(test)]
@@ -719,5 +837,208 @@ mod tests {
         // 名字留空时用源名字加后缀，而不是给一个空名字
         let auto = duplicate(&p, "main", "auto", "", |_, _| {}).unwrap();
         assert_eq!(auto.name, "My main (copy)");
+    }
+
+    /// 造一个"用过一阵子"的实例：有 mod、有存档，也有启动产生的噪音。
+    fn lived_in(p: &Paths, slug: &str) -> Instance {
+        let mut inst = sample(slug, "1.21.4");
+        inst.memory_mb = Some(8192);
+        inst.java_path = Some(PathBuf::from(if cfg!(windows) {
+            r"C:\jdk\bin\java.exe"
+        } else {
+            "/usr/lib/jvm/java-21/bin/java"
+        }));
+        inst.extra_jvm_args = vec!["-XX:+UseG1GC".into()];
+        inst.extra_game_args = vec!["--versionType".into(), "Mythic".into()];
+        inst.launches = 9;
+        inst.last_launched_at = Some(1_800_000_000);
+        save(p, &inst).unwrap();
+
+        let game = game_dir(p, slug).unwrap();
+        std::fs::create_dir_all(game.join("mods")).unwrap();
+        std::fs::write(game.join("mods/a.jar"), b"mod").unwrap();
+        std::fs::create_dir_all(game.join("saves/w/region")).unwrap();
+        std::fs::write(game.join("saves/w/level.dat"), b"level").unwrap();
+        std::fs::write(game.join("saves/w/region/r.0.0.mca"), b"chunk").unwrap();
+        std::fs::create_dir_all(game.join("logs")).unwrap();
+        std::fs::write(game.join("logs/latest.log"), b"noise").unwrap();
+        std::fs::create_dir_all(instance_dir(p, slug).unwrap().join("natives")).unwrap();
+        std::fs::write(
+            instance_dir(p, slug).unwrap().join("natives/lwjgl.dll"),
+            b"x",
+        )
+        .unwrap();
+        inst
+    }
+
+    #[test]
+    fn export_then_import_roundtrips() {
+        let (d, p) = paths();
+        let original = lived_in(&p, "main");
+        let zip = d.path().join("export/main.zip");
+
+        let summary = export(&p, "main", &zip, true).unwrap();
+        assert!(
+            summary.files >= 4,
+            "instance.json + mod + level.dat + region：{summary:?}"
+        );
+        assert!(zip.is_file());
+
+        let imported = import(&p, &zip, "imported", "").unwrap();
+        assert_eq!(imported.slug, "imported");
+        assert_eq!(imported.name, "My main", "留空名字时沿用包里显示的名字");
+        assert_eq!(imported.version_id, original.version_id);
+        assert_eq!(imported.memory_mb, Some(8192));
+        assert_eq!(imported.extra_jvm_args, vec!["-XX:+UseG1GC".to_string()]);
+        assert_eq!(
+            imported.extra_game_args,
+            vec!["--versionType".to_string(), "Mythic".to_string()]
+        );
+        // 启动统计归零：这个实例在这台机器上还没被启动过
+        assert_eq!(imported.launches, 0);
+        assert_eq!(imported.last_launched_at, None);
+        // 别人机器上的 Java 路径在这台机器上没有意义，留着只会让第一次启动报错
+        assert_eq!(imported.java_path, None, "自定义 Java 路径必须在导入时清空");
+
+        let game = game_dir(&p, "imported").unwrap();
+        assert_eq!(std::fs::read(game.join("mods/a.jar")).unwrap(), b"mod");
+        assert_eq!(
+            std::fs::read(game.join("saves/w/region/r.0.0.mca")).unwrap(),
+            b"chunk"
+        );
+        // 噪音不进包，所以也不该出现在导入结果里
+        assert!(!game.join("logs").exists());
+        assert!(
+            !instance_dir(&p, "imported")
+                .unwrap()
+                .join("natives")
+                .exists()
+        );
+        // 源实例没被动过
+        assert_eq!(load(&p, "main").unwrap().launches, 9);
+    }
+
+    #[test]
+    fn export_can_leave_the_world_behind() {
+        let (d, p) = paths();
+        lived_in(&p, "main");
+        let zip = d.path().join("share.zip");
+        let s = export(&p, "main", &zip, false).unwrap();
+
+        let info = inspect_archive(&zip).unwrap();
+        assert_eq!(info.version_id, "1.21.4");
+        let imported = import(&p, &zip, "shared", "分享包").unwrap();
+        assert_eq!(imported.name, "分享包");
+        let game = game_dir(&p, "shared").unwrap();
+        assert!(game.join("mods/a.jar").is_file());
+        assert!(
+            !game.join("saves").exists(),
+            "不含存档的分享包不该把别人的世界带过来"
+        );
+        assert!(s.files > 0);
+    }
+
+    #[test]
+    fn inspect_reads_the_archive_without_writing_anything() {
+        let (d, p) = paths();
+        lived_in(&p, "main");
+        let zip = d.path().join("a.zip");
+        export(&p, "main", &zip, true).unwrap();
+
+        let info = inspect_archive(&zip).unwrap();
+        assert_eq!(info.name, "My main");
+        assert_eq!(info.version_id, "1.21.4");
+        assert_eq!(info.memory_mb, Some(8192));
+        assert!(info.had_custom_java, "包里的自定义 Java 路径要被标出来");
+        assert_eq!(info.extra_jvm_args, vec!["-XX:+UseG1GC".to_string()]);
+        assert!(info.files > 0 && info.bytes > 0);
+        // 关键是"看一眼"不产生任何副作用：还没同意导入就不该有目录
+        assert_eq!(
+            std::fs::read_dir(p.instances())
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .collect::<Vec<_>>(),
+            vec!["main".to_string()],
+            "inspect_archive 只该读，不该建实例目录"
+        );
+        // 这个结构要跨 IPC，字段名两侧由 shape_contract 门比对
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(json.contains("\"hadCustomJava\":true"), "{json}");
+        assert!(json.contains("\"extraJvmArgs\""), "{json}");
+    }
+
+    #[test]
+    fn import_refuses_archives_that_are_not_instances() {
+        let (d, p) = paths();
+        // 一个合法的 zip，但根目录没有 instance.json
+        let not_instance = d.path().join("mod.zip");
+        {
+            let f = std::fs::File::create(&not_instance).unwrap();
+            let mut z = zip::ZipWriter::new(f);
+            let opts: zip::write::SimpleFileOptions = Default::default();
+            z.start_file("some-mod.jar", opts).unwrap();
+            std::io::Write::write_all(&mut z, b"fake").unwrap();
+            z.finish().unwrap();
+        }
+        let err = import(&p, &not_instance, "x", "").unwrap_err();
+        assert!(
+            err.to_string().contains("not a Compass instance export"),
+            "{err}"
+        );
+        assert!(
+            !instance_dir(&p, "x").unwrap().exists(),
+            "失败不该留下半个实例"
+        );
+
+        // 根本不是 zip
+        let garbage = d.path().join("garbage.zip");
+        std::fs::write(&garbage, b"not a zip at all").unwrap();
+        assert!(import(&p, &garbage, "y", "").is_err());
+        assert!(!instance_dir(&p, "y").unwrap().exists());
+
+        // 目标已存在
+        save(&p, &sample("taken", "1.21.4")).unwrap();
+        let zip = d.path().join("ok.zip");
+        lived_in(&p, "main");
+        export(&p, "main", &zip, true).unwrap();
+        let err = import(&p, &zip, "taken", "").unwrap_err();
+        assert!(err.to_string().contains("already exists"), "{err}");
+        assert_eq!(
+            load(&p, "taken").unwrap().name,
+            "My taken",
+            "已有实例不能被覆盖"
+        );
+    }
+
+    #[test]
+    fn import_ignores_the_slug_inside_the_archive() {
+        let (d, p) = paths();
+        lived_in(&p, "main");
+        let zip = d.path().join("a.zip");
+        export(&p, "main", &zip, true).unwrap();
+
+        // 包里的 instance.json 写着 slug=main；导入成别的名字后，身份以目录为准
+        let imported = import(&p, &zip, "elsewhere", "").unwrap();
+        assert_eq!(imported.slug, "elsewhere");
+        assert_eq!(load(&p, "elsewhere").unwrap().slug, "elsewhere");
+        // 原来的 main 没被覆盖
+        assert_eq!(load(&p, "main").unwrap().launches, 9);
+        // slug 规则照旧适用于导入
+        assert!(import(&p, &zip, "../escape", "").is_err());
+    }
+
+    #[test]
+    fn export_refuses_to_write_into_the_instance_itself() {
+        let (d, p) = paths();
+        lived_in(&p, "main");
+        let inside = instance_dir(&p, "main").unwrap().join("self.zip");
+        let err = export(&p, "main", &inside, true).unwrap_err();
+        assert!(
+            err.to_string().contains("into the instance itself"),
+            "{err}"
+        );
+        let err = export(&p, "nope", &d.path().join("x.zip"), true).unwrap_err();
+        assert!(matches!(err, Error::NotFound(_)), "{err:?}");
     }
 }

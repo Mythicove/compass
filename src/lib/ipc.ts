@@ -204,6 +204,28 @@ export interface JavaRuntime {
   is64bit: boolean;
 }
 
+/** 导出结果（对应 Rust 的 `archive::ZipSummary`）。 */
+export interface ZipSummary {
+  files: number;
+  bytes: number;
+}
+
+/** 导入前对压缩包的"看一眼"（对应 Rust 的 `instance::ArchiveInfo`）。
+ *  这些字段会影响启动行为，UI 必须在导入前原样摊开给用户看。 */
+export interface ArchiveInfo {
+  name: string;
+  versionId: string;
+  memoryMb: number | null;
+  files: number;
+  bytes: number;
+  extraJvmArgs: string[];
+  extraGameArgs: string[];
+  server: ServerJoin | null;
+  demo: boolean;
+  /** 包里带了别人机器上的 Java 路径；导入时会被清空 */
+  hadCustomJava: boolean;
+}
+
 export interface LaunchInfo {
   instance: string;
   versionId: string;
@@ -308,6 +330,15 @@ export const ipc = {
   /** 复制实例；进度经 EVENTS.copyProgress 推送 */
   instanceDuplicate: (slug: string, newSlug: string, newName: string) =>
     invoke<Instance>("instance_duplicate", { slug, newSlug, newName }),
+  /** 导出为 zip；dest 来自原生保存对话框 */
+  instanceExport: (slug: string, dest: string, includeSaves: boolean) =>
+    invoke<ZipSummary>("instance_export", { slug, dest, includeSaves }),
+  /** 只读压缩包里的 instance.json，不落盘；UI 据此在导入前让用户确认 */
+  instanceInspectArchive: (path: string) =>
+    invoke<ArchiveInfo>("instance_inspect_archive", { path }),
+  /** slug 由调用方给，不取自压缩包 */
+  instanceImport: (path: string, slug: string, name: string) =>
+    invoke<Instance>("instance_import", { path, slug, name }),
   /** 这个实例会用哪个 Java；null = 没找到（此时启动会失败，UI 要提前说清楚） */
   instanceJava: (slug: string) => invoke<JavaRuntime | null>("instance_java", { slug }),
 

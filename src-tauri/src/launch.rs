@@ -335,19 +335,16 @@ pub fn extract_natives(natives: &[(PathBuf, Vec<String>)], dest: &Path) -> Resul
             if entry.is_dir() || is_excluded(&name, exclude) {
                 continue;
             }
-            let rel = Path::new(&name);
-            // zip-slip 防护：拒绝绝对路径与任何 .. 分量
-            if rel.is_absolute()
-                || rel
-                    .components()
-                    .any(|c| matches!(c, std::path::Component::ParentDir))
-            {
-                return Err(Error::Invalid(format!(
+            // zip-slip 防护用的是 archive::safe_rel_path —— 全 crate 只有一份实现。
+            // natives jar 来自版本 JSON 指定的仓库，但"来源可信"不是把路径校验省掉的理由；
+            // P2 的实例导入、P3 的整合包解压面对的是**别人给的文件**，更不能各写一套。
+            let rel = crate::archive::safe_rel_path(&name).map_err(|_| {
+                Error::Invalid(format!(
                     "refusing unsafe entry {name:?} in {}",
                     jar.display()
-                )));
-            }
-            let out = dest.join(rel);
+                ))
+            })?;
+            let out = dest.join(&rel);
             if let Some(parent) = out.parent() {
                 std::fs::create_dir_all(parent)?;
             }

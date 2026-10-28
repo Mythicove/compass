@@ -6,6 +6,7 @@
 
 pub mod account;
 pub mod api;
+pub mod archive;
 pub mod assets;
 pub mod authlibinjector;
 pub mod commands;
@@ -84,6 +85,9 @@ pub fn run() {
             commands::instance_delete,
             commands::instance_update,
             commands::instance_duplicate,
+            commands::instance_export,
+            commands::instance_inspect_archive,
+            commands::instance_import,
             commands::instance_java,
             commands::content_list,
             commands::content_set_enabled,

@@ -12,11 +12,12 @@ use tokio::sync::Notify;
 
 use crate::account::{self, Account, AccountView, now_unix};
 use crate::api::{Project, SearchResponse, Version, png_data_url};
+use crate::archive::ZipSummary;
 use crate::config::{self, Config};
 use crate::content::{self, ContentItem, ContentStats, Kind};
 use crate::error::Error;
 use crate::install::{InstalledVersion, Installer};
-use crate::instance::{self, Instance, InstanceSettings};
+use crate::instance::{self, ArchiveInfo, Instance, InstanceSettings};
 use crate::java::{self, JavaRuntime};
 use crate::launch;
 use crate::meta::{ManifestEntry, MetaClient};
@@ -371,6 +372,47 @@ pub async fn instance_duplicate(
     // tx 随闭包结束被 drop，转发任务随之收尾
     let _ = forwarder.await;
     result
+}
+
+/// 导出实例为 zip。`dest` 来自原生保存对话框（用户明确选的路径，不是数据里带来的）。
+#[tauri::command]
+pub async fn instance_export(
+    state: State<'_, Arc<AppState>>,
+    slug: String,
+    dest: PathBuf,
+    include_saves: bool,
+) -> Result<ZipSummary, Error> {
+    require_stopped(&state, &slug).await?;
+    let paths = state.paths.clone();
+    tokio::task::spawn_blocking(move || instance::export(&paths, &slug, &dest, include_saves))
+        .await
+        .map_err(join_err)?
+}
+
+/// 导入前先"看一眼"压缩包：只读里面的 `instance.json`，不解压、不落盘。
+///
+/// 这一步是导入流程的**安全前提**，不是可选的预览：实例配置里有 `java_path` 与
+/// 自定义 JVM 参数，导入并启动就等于让一个外部文件决定执行什么。UI 必须先把它
+/// 摊开给用户看、由用户确认，才调用 `instance_import`。
+#[tauri::command]
+pub async fn instance_inspect_archive(path: PathBuf) -> Result<ArchiveInfo, Error> {
+    tokio::task::spawn_blocking(move || instance::inspect_archive(&path))
+        .await
+        .map_err(join_err)?
+}
+
+/// 导入一个实例导出包。slug 由调用方给（不取自包内），目录已存在则拒绝。
+#[tauri::command]
+pub async fn instance_import(
+    state: State<'_, Arc<AppState>>,
+    path: PathBuf,
+    slug: String,
+    name: String,
+) -> Result<Instance, Error> {
+    let paths = state.paths.clone();
+    tokio::task::spawn_blocking(move || instance::import(&paths, &path, &slug, &name))
+        .await
+        .map_err(join_err)?
 }
 
 /// 探测这个实例会用哪个 Java（UI 展示 + 让用户在启动前就知道缺 Java）。
