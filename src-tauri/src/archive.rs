@@ -205,13 +205,11 @@ mod tests {
 
     #[test]
     fn safe_rel_path_blocks_every_escape_form() {
+        // 这些在**任何**平台都必须被拒绝
         for bad in [
             "../escape.txt",
-            "..\\escape.txt",
             "a/../../escape.txt",
             "/etc/passwd",
-            "C:\\Windows\\system32\\x.dll",
-            "C:evil.dll",
             "./../x",
             "",
             ".",
@@ -225,6 +223,56 @@ mod tests {
             safe_rel_path(".minecraft/mods/a.jar").unwrap(),
             PathBuf::from(".minecraft").join("mods").join("a.jar")
         );
+
+        // 反斜杠与盘符**只在 Windows 上**是分隔符/前缀。在 Unix 上 `..\escape.txt`
+        // 只是一个名字里带反斜杠的普通文件：解压出来是 dest 里一个叫这个名字的文件，
+        // 不构成穿越。所以按平台断言各自真正被保证的东西——
+        // 把 Windows 专属的形式当成"所有平台都该拒绝"，CI 上就是 macOS/Linux 一起红。
+        let windows_only = [
+            "..\\escape.txt",
+            "C:\\Windows\\system32\\x.dll",
+            "C:evil.dll",
+        ];
+        if cfg!(windows) {
+            for bad in windows_only {
+                assert!(safe_rel_path(bad).is_err(), "windows should reject {bad:?}");
+            }
+        } else {
+            for name in windows_only {
+                let rel = safe_rel_path(name)
+                    .unwrap_or_else(|e| panic!("unix 上 {name:?} 不是穿越，不该被拒：{e}"));
+                // 关键不变量：拼到目标目录后面仍然在目标目录里面
+                assert!(!rel.is_absolute(), "{name:?} → {rel:?}");
+                assert!(
+                    !rel.components()
+                        .any(|c| matches!(c, Component::ParentDir | Component::RootDir)),
+                    "{name:?} → {rel:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn joined_destination_never_escapes_for_any_rejected_or_accepted_entry() {
+        // 上一条测的是"哪些名字被拒"；这条测的是**真正要保证的事**：
+        // 凡是 safe_rel_path 放行的名字，拼到任意目标目录后都仍在该目录内。
+        let dest = Path::new("/tmp/instance/.minecraft");
+        for name in [
+            "instance.json",
+            ".minecraft/mods/a.jar",
+            "a/b/c/d.txt",
+            "..\\escape.txt",
+            "C:evil.dll",
+        ] {
+            let Ok(rel) = safe_rel_path(name) else {
+                continue; // 被拒的条目根本不会被拼接
+            };
+            let joined = dest.join(&rel);
+            assert!(
+                joined.starts_with(dest),
+                "{name:?} 拼出来跑到了目标目录外：{joined:?}"
+            );
+        }
     }
 
     #[test]
