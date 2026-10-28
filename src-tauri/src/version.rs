@@ -681,7 +681,8 @@ pub fn game_arguments(
 ///   只有一条 `-DFabricMcEmu= net.minecraft.client.main.Main`，若用它替换父版本，
 ///   启动命令里就没有 `-Djava.library.path` 也没有 `-cp`，游戏根本起不来。
 ///   JVM 选项之间的顺序无关紧要（只要都在主类之前），故拼接是安全的。
-/// - 资源索引/下载/日志/Java 版本子缺则取父。
+/// - 资源索引/下载/日志/Java 版本子缺则取父；
+/// - 库按 Maven 身份去重（`library_key`），子版本赢。
 pub fn merge(parent: VersionJson, child: VersionJson) -> VersionJson {
     let arguments = match (child.arguments, parent.arguments) {
         (Some(c), Some(p)) => Some(Arguments {
@@ -710,11 +711,13 @@ pub fn merge(parent: VersionJson, child: VersionJson) -> VersionJson {
         asset_index: child.asset_index.or(parent.asset_index),
         assets: child.assets.or(parent.assets),
         downloads: child.downloads.or(parent.downloads),
-        libraries: child
-            .libraries
-            .into_iter()
-            .chain(parent.libraries)
-            .collect(),
+        libraries: dedupe_libraries(
+            child
+                .libraries
+                .into_iter()
+                .chain(parent.libraries)
+                .collect(),
+        ),
         java_version: child.java_version.or(parent.java_version),
         logging: child.logging.or(parent.logging),
         minimum_launcher_version: match (
@@ -725,6 +728,42 @@ pub fn merge(parent: VersionJson, child: VersionJson) -> VersionJson {
             (c, p) => c.or(p),
         },
     }
+}
+
+/// 库去重的键：`group:artifact[:classifier[@ext]]`——**不含版本号**。
+///
+/// 版本号不进键：父子给了同一个逻辑库的不同版本时，子版本赢（合并时子版本的库
+/// 排在前面，而 classpath 上先出现的先被加载）。
+/// classifier 必须进键：`org.lwjgl:lwjgl:3.3.3` 与 `org.lwjgl:lwjgl:3.3.3:natives-windows`
+/// 是两个不同的文件，都要留在 classpath 上。
+pub fn library_key(name: &str) -> String {
+    let parts: Vec<&str> = name.split(':').collect();
+    if parts.len() < 3 {
+        // 段数不足的畸形坐标原样返回：数据来自服务端，不该在这里 panic
+        return name.to_string();
+    }
+    // parts[2] 是版本，跳过；后面的（classifier、@ext）都进键
+    let mut key = format!("{}:{}", parts[0], parts[1]);
+    for p in &parts[3..] {
+        key.push(':');
+        key.push_str(p);
+    }
+    key
+}
+
+/// 按 `library_key` 去重，保留**第一次出现**的那条。
+///
+/// 不是可选的清理：原版 1.21.4 带 `org.ow2.asm:asm:9.6`，而 NeoForge 带 9.8
+/// 并且把 9.8 放进了模块路径（`-p`）。两份 asm 同时出现在 classpath 上时，
+/// BootstrapLauncher 会直接抛 `Module named org.objectweb.asm was already on the
+/// JVMs module path ... but class-path contains it at ...asm-9.6.jar`——
+/// 这是拿官方 installer 的产物真跑一次启动时看到的报错，不是推测。
+/// Fabric 同样会重复带 asm（9.10.1 对 9.6），只是它没有模块路径检查，所以一直没炸。
+fn dedupe_libraries(libs: Vec<Library>) -> Vec<Library> {
+    let mut seen = std::collections::HashSet::new();
+    libs.into_iter()
+        .filter(|l| seen.insert(library_key(&l.name)))
+        .collect()
 }
 
 #[cfg(test)]
@@ -1102,8 +1141,13 @@ mod tests {
         assert_eq!(merged.asset_index_id(), Some("19"));
         assert!(merged.logging.is_some());
         assert_eq!(merged.java_version.as_ref().unwrap().major_version, 21);
-        // 库是"子在前 + 父在后"：子的类要能覆盖父的
-        assert_eq!(merged.libraries.len(), 8 + 113);
+        // 库是"子在前 + 父在后"，并按 Maven 身份去重（子赢）：
+        // 原版带 asm 9.6、Fabric 带 9.10.1，重复的那一份必须被去掉
+        assert_eq!(
+            merged.libraries.len(),
+            8 + 113 - 1,
+            "父子只有 org.ow2.asm:asm 一条重叠"
+        );
         assert!(merged.libraries[0].name.contains("asm"));
         assert!(
             merged.libraries[8..]
@@ -1132,6 +1176,82 @@ mod tests {
             has(&jvm, "/cp/a.jar;/cp/b.jar"),
             "classpath must come from the parent: {jvm:?}"
         );
+    }
+
+    #[test]
+    fn merge_dedupes_libraries_by_maven_identity_with_the_child_winning() {
+        // 真实重叠：原版 1.21.4 带 org.ow2.asm:asm:9.6，Fabric 带 9.10.1。
+        // 两份都留在 classpath 上时，NeoForge 的 BootstrapLauncher 会直接抛
+        // "Module named org.objectweb.asm was already on the JVMs module path ...
+        //  but class-path contains it at ...asm-9.6.jar"（拿官方 installer 的产物
+        // 真跑启动时看到的报错）。Fabric 只是没做这个检查，所以一直没炸。
+        let merged = merge(v1214(), fabric());
+        let asm: Vec<&str> = merged
+            .libraries
+            .iter()
+            .filter(|l| library_key(&l.name) == "org.ow2.asm:asm")
+            .map(|l| l.name.as_str())
+            .collect();
+        assert_eq!(asm.len(), 1, "同一个逻辑库只能留一份：{asm:?}");
+        assert!(
+            asm[0].ends_with(":9.10.1"),
+            "留下来的必须是子版本的（classpath 上子在前，先加载）：{}",
+            asm[0]
+        );
+        // Fabric 独有的 asm 子构件不受影响（原版没有它们，不构成重复）
+        for a in ["asm-analysis", "asm-commons", "asm-tree", "asm-util"] {
+            assert!(
+                merged
+                    .libraries
+                    .iter()
+                    .any(|l| l.name.starts_with(&format!("org.ow2.asm:{a}:"))),
+                "{a} 不该被去掉"
+            );
+        }
+        // classifier 不同的条目是**不同的文件**，必须都留着：
+        // 去掉 natives 分片的话 LWJGL 会加载不到本地库
+        let lwjgl: Vec<&str> = merged
+            .libraries
+            .iter()
+            .filter(|l| l.name.starts_with("org.lwjgl:lwjgl:"))
+            .map(|l| l.name.as_str())
+            .collect();
+        assert!(lwjgl.contains(&"org.lwjgl:lwjgl:3.3.3"), "{lwjgl:?}");
+        assert!(
+            lwjgl.iter().any(|n| n.ends_with(":natives-windows")),
+            "natives 分片不能被当成重复去掉：{lwjgl:?}"
+        );
+        assert!(
+            lwjgl.iter().any(|n| n.ends_with(":natives-linux")),
+            "{lwjgl:?}"
+        );
+        // 整个列表里没有重复的键
+        let keys: Vec<String> = merged
+            .libraries
+            .iter()
+            .map(|l| library_key(&l.name))
+            .collect();
+        let mut seen = std::collections::HashSet::new();
+        let dupes: Vec<&String> = keys.iter().filter(|k| !seen.insert(*k)).collect();
+        assert!(dupes.is_empty(), "合并后仍有重复的库：{dupes:?}");
+    }
+
+    #[test]
+    fn library_key_ignores_version_but_keeps_classifier() {
+        assert_eq!(library_key("org.ow2.asm:asm:9.6"), "org.ow2.asm:asm");
+        assert_eq!(library_key("org.ow2.asm:asm:9.10.1"), "org.ow2.asm:asm");
+        assert_ne!(
+            library_key("org.lwjgl:lwjgl:3.3.3"),
+            library_key("org.lwjgl:lwjgl:3.3.3:natives-windows"),
+            "classifier 不同的必须算两个库"
+        );
+        assert_eq!(
+            library_key("net.neoforged:neoform:1.21.4-20241203.161809:mappings@txt"),
+            "net.neoforged:neoform:mappings@txt"
+        );
+        // 段数不足的畸形坐标原样返回，不要 panic（数据来自服务端）
+        assert_eq!(library_key("weird"), "weird");
+        assert_eq!(library_key("a:b"), "a:b");
     }
 
     #[test]
