@@ -263,11 +263,15 @@ pub struct Project {
     pub published: String,
 }
 
+/// Hoard 的 version。必填字段以 `api/specs/hoard.openapi.yaml` 的 `required` 为准
+/// （`id` / `project_id` / `version_number`）——比规范更严会让一个**合法**响应
+/// 把整个版本列表解码失败，UI 上表现为"搜索到了但点不开"。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Version {
     pub id: String,
     pub project_id: String,
     pub version_number: String,
+    #[serde(default)]
     pub version_type: String,
     #[serde(default)]
     pub loaders: Vec<String>,
@@ -277,14 +281,21 @@ pub struct Version {
     pub files: Vec<File>,
 }
 
+/// Hoard 的 version file。规范里没有 `required`，所以全部字段都容忍缺省；
+/// 真正用到它的地方（`hoard_install`）会校验：空 filename 过不了
+/// `content::validate_file_name`，空 url 过不了 `Url::parse`，各自报错而不是静默下载个空文件。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct File {
+    #[serde(default)]
     pub url: String,
+    #[serde(default)]
     pub filename: String,
     #[serde(default)]
     pub primary: bool,
     #[serde(default)]
     pub size: i64,
+    /// 规范里是 `sha1` + `sha512`（没有 sha256）。缺 sha1 时下载器跳过校验——
+    /// 那是"无从校验"，不是"校验通过"。
     #[serde(default)]
     pub hashes: std::collections::HashMap<String, String>,
 }
@@ -363,5 +374,87 @@ mod tests {
         let r: AuthenticateResponse = serde_json::from_str(json).unwrap();
         assert_eq!(r.selected_profile.unwrap().name, "Alice");
         assert_eq!(r.available_profiles.len(), 1);
+    }
+
+    /// Hoard 的响应形状。真值在三处，改任何一处都要回来看这条测试：
+    /// - `mythic-hoard/internal/hoard/store.go`：`Project` / `Version` / `File` 的 json tag
+    /// - `mythic-hoard/internal/hoard/service.go`：`SearchResult{hits,offset,limit,total_hits}`
+    /// - `api/specs/hoard.openapi.yaml`：对外契约（`File.hashes` 是 **sha1 + sha512**，没有 sha256）
+    ///
+    /// 样本刻意包含"字段缺省"的情形：Go 侧 `loaders`/`game_versions` 带 `omitempty`，
+    /// 空数组时整个键不出现——我们这边必须有 `#[serde(default)]`，否则一次搜索就整体解码失败。
+    #[test]
+    fn hoard_wire_shapes_parse_including_omitted_arrays() {
+        let search = r#"{
+            "hits": [
+                {
+                    "id": "p1", "slug": "sodium", "title": "Sodium",
+                    "description": "A modern rendering engine", "project_type": "mod",
+                    "downloads": 12345, "published": "2024-01-02T03:04:05Z",
+                    "loaders": ["fabric"], "game_versions": ["1.21.4"]
+                },
+                {
+                    "id": "p2", "slug": "minimal", "title": "Minimal",
+                    "project_type": "mod", "downloads": 0, "published": ""
+                }
+            ],
+            "offset": 0, "limit": 50, "total_hits": 2
+        }"#;
+        let res: SearchResponse<Project> = serde_json::from_str(search).unwrap();
+        assert_eq!(res.total_hits, 2);
+        assert_eq!(res.hits[0].loaders, vec!["fabric".to_string()]);
+        // omitempty 的键整个不存在时必须是空数组，而不是解码失败
+        assert!(res.hits[1].loaders.is_empty(), "{:?}", res.hits[1].loaders);
+        assert!(res.hits[1].game_versions.is_empty());
+        assert_eq!(res.hits[1].description, "", "description 也不是必填");
+
+        let versions = r#"[
+            {
+                "id": "v1", "project_id": "p1", "name": "Sodium 0.6.13",
+                "version_number": "0.6.13", "version_type": "release",
+                "loaders": ["fabric"], "game_versions": ["1.21.4"],
+                "date_published": "2024-12-03T10:12:57Z",
+                "files": [
+                    {
+                        "url": "https://cdn.example.com/files/ab/cd/sodium.jar",
+                        "filename": "sodium-fabric-0.6.13+mc1.21.4.jar",
+                        "primary": true, "size": 1306799,
+                        "hashes": {
+                            "sha1": "8f6f0c1e5d4b3a29187f6e5d4c3b2a1908f7e6d5",
+                            "sha512": "abcd"
+                        }
+                    },
+                    {
+                        "url": "https://cdn.example.com/files/ab/cd/sodium-sources.jar",
+                        "filename": "sodium-fabric-0.6.13-sources.jar",
+                        "primary": false, "size": 1, "hashes": {}
+                    }
+                ]
+            },
+            { "id": "v2", "project_id": "p1", "version_number": "0.6.12", "files": [] }
+        ]"#;
+        let list: Vec<Version> = serde_json::from_str(versions).unwrap();
+        assert_eq!(list.len(), 2);
+        // 版本可以只有规范里的三个必填字段（id/project_id/version_number）
+        assert_eq!(list[1].version_type, "");
+        assert!(list[1].loaders.is_empty());
+
+        let primary = list[0]
+            .files
+            .iter()
+            .find(|f| f.primary)
+            .expect("应当能挑出 primary 文件");
+        assert_eq!(primary.filename, "sodium-fabric-0.6.13+mc1.21.4.jar");
+        assert_eq!(primary.size, 1306799);
+        // 安装时校验的就是这个 sha1（Hoard 上传时一定会算，见 storeFile）；
+        // 拿不到 sha1 就是"无从校验"，不能当成"校验通过"
+        assert_eq!(
+            primary.hashes.get("sha1").map(String::as_str),
+            Some("8f6f0c1e5d4b3a29187f6e5d4c3b2a1908f7e6d5")
+        );
+        assert!(
+            !list[0].files[1].hashes.contains_key("sha1"),
+            "空 hashes 里没有 sha1，不是空串——两者在下载器里含义不同"
+        );
     }
 }

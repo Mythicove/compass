@@ -379,8 +379,13 @@ fn list_dir(base: &Path, kind: Kind, enabled: bool) -> Vec<ContentItem> {
         .filter(|e| e.path().is_file())
         .filter_map(|e| {
             let file_name = e.file_name().to_str()?.to_string();
-            // 编辑器的临时文件与 macOS 的元数据文件不是内容
-            if file_name.starts_with('.') || file_name.ends_with(".tmp") {
+            // 编辑器的临时文件、macOS 的元数据文件、下载器的续传半成品都不是内容。
+            // `.part` 尤其要挡：下载中断会把 `mods/foo.jar.part` 留在这儿，
+            // 显示成一个"mod"的话，用户会以为装了个坏 mod。
+            if file_name.starts_with('.')
+                || file_name.ends_with(".tmp")
+                || file_name.ends_with(".part")
+            {
                 return None;
             }
             let md = e.metadata().ok()?;
@@ -491,7 +496,13 @@ pub fn set_enabled(game_dir: &Path, file_name: &str, enabled: bool) -> Result<Co
     item_for(game_dir, kind, &to, enabled)
 }
 
-fn item_for(game_dir: &Path, kind: Kind, path: &Path, enabled: bool) -> Result<ContentItem, Error> {
+/// 从磁盘上的一个文件构造列表条目（下载完成后回报给 UI 用）。
+pub fn item_for(
+    game_dir: &Path,
+    kind: Kind,
+    path: &Path,
+    enabled: bool,
+) -> Result<ContentItem, Error> {
     let md = std::fs::metadata(path)?;
     let file_name = path
         .file_name()
@@ -823,9 +834,11 @@ mod tests {
         // `.disabled` 后缀是同一种禁用态的另一种写法
         std::fs::create_dir_all(game.join("mods")).unwrap();
         std::fs::write(game.join("mods/suffix.jar.disabled"), b"fake").unwrap();
-        // 隐藏文件与临时文件不是内容；子目录本身也不该出现在列表里
+        // 隐藏文件、临时文件与下载器的续传半成品都不是内容；子目录本身也不该出现在列表里
         std::fs::write(game.join("mods/.DS_Store"), b"x").unwrap();
         std::fs::write(game.join("mods/part.tmp"), b"x").unwrap();
+        // 下载中断会留下 .part；把它显示成一个"mod"，用户会以为装了个坏 mod
+        std::fs::write(game.join("mods/half.jar.part"), b"partial").unwrap();
 
         let items = scan(&game, Kind::Mods);
         let names: Vec<_> = items

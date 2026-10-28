@@ -77,6 +77,7 @@ pub fn run() {
             commands::mirror_skin_data_url,
             commands::hoard_search,
             commands::hoard_versions,
+            commands::hoard_install,
             commands::versions_list,
             commands::versions_installed,
             commands::install_version,

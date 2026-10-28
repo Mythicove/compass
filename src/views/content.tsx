@@ -1,14 +1,17 @@
 import { useCallback, useEffect, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { errorKey, useI18n } from "../i18n";
 import {
   CONTENT_KINDS,
+  EVENTS,
   ipc,
   toIpcError,
   type ContentKind,
   type ContentListing,
+  type FileProgress,
   type HoardProject,
   type HoardVersion,
   type Instance,
@@ -152,6 +155,14 @@ export function ContentView({ initialSlug }: { initialSlug?: string }) {
     });
 
   const stats = listing?.stats;
+  const selected = instances.find((i) => i.slug === slug);
+  // P2 还没接 loader，versionId 就是游戏版本。装了 Fabric/Forge 之后它是继承版本 id，
+  // 那时要从版本 JSON 取 jar_version()——只有这一处需要改。
+  const gameVersion = selected?.versionId ?? "";
+  const onInstalled = (fileName: string) => {
+    setNotice(t("mods.installed", { name: fileName }));
+    void reload();
+  };
 
   return (
     <div className="stack">
@@ -300,18 +311,30 @@ export function ContentView({ initialSlug }: { initialSlug?: string }) {
         )}
       </section>
 
-      <HoardBrowser onError={fail} />
+      <HoardBrowser slug={slug} kind={kind} gameVersion={gameVersion} onError={fail} onInstalled={onInstalled} />
     </div>
   );
 }
 
-/** Hoard 浏览（P0 的能力保留在这里）。直接安装到实例是 P2 的最后一步。 */
-function HoardBrowser({ onError }: { onError: (e: unknown) => void }) {
+interface HoardBrowserProps {
+  /** 当前选中的实例；为空时不允许安装（没地方可装） */
+  slug: string;
+  kind: ContentKind;
+  /** 实例的游戏版本，用来标出可能不兼容的版本（P3 装了 loader 之后才有更准的判据） */
+  gameVersion: string;
+  onError: (e: unknown) => void;
+  onInstalled: (fileName: string) => void;
+}
+
+/** Hoard 浏览 + 装进当前实例。 */
+function HoardBrowser({ slug, kind, gameVersion, onError, onInstalled }: HoardBrowserProps) {
   const { t } = useI18n();
   const [q, setQ] = useState("");
   const [hits, setHits] = useState<HoardProject[] | null>(null);
   const [versions, setVersions] = useState<Record<string, HoardVersion[]>>({});
   const [busy, setBusy] = useState(false);
+  const [installing, setInstalling] = useState<string | null>(null);
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
 
   // 进页面就拉一次默认列表，之后按搜索词刷新
   useEffect(() => {
@@ -328,6 +351,22 @@ function HoardBrowser({ onError }: { onError: (e: unknown) => void }) {
       cancelled = true;
     };
   }, [onError]);
+
+  // 下载进度与版本安装共用同一条事件通道（Rust 侧只有一个 Downloader）
+  useEffect(() => {
+    let un: (() => void) | null = null;
+    let cancelled = false;
+    void listen<FileProgress>(EVENTS.progress, (e) => {
+      setProgress({ done: e.payload.doneBytes, total: e.payload.totalBytes });
+    }).then((off) => {
+      if (cancelled) off();
+      else un = off;
+    });
+    return () => {
+      cancelled = true;
+      un?.();
+    };
+  }, []);
 
   const search = async () => {
     setBusy(true);
@@ -351,6 +390,36 @@ function HoardBrowser({ onError }: { onError: (e: unknown) => void }) {
     }
   };
 
+  /** 装 primary 文件（没有 primary 就装第一个）。 */
+  const install = async (v: HoardVersion) => {
+    if (installing) return;
+    const file = v.files.find((f) => f.primary) ?? v.files[0];
+    if (!file) {
+      onError({ code: "invalid", message: "this version lists no downloadable file" });
+      return;
+    }
+    // Hoard 的版本标签可能不全，所以不硬拦；但"可能不兼容"必须说出来，
+    // 不能等游戏崩了让用户自己猜是哪个 mod 的问题。
+    const listed = v.game_versions ?? [];
+    if (gameVersion && listed.length > 0 && !listed.includes(gameVersion)) {
+      const ok = window.confirm(
+        t("mods.incompatibleConfirm", { version: v.version_number, game: gameVersion }),
+      );
+      if (!ok) return;
+    }
+    setInstalling(v.id);
+    setProgress(null);
+    try {
+      const item = await ipc.hoardInstall(slug, kind, file);
+      onInstalled(item.fileName);
+    } catch (e) {
+      onError(e);
+    } finally {
+      setInstalling(null);
+      setProgress(null);
+    }
+  };
+
   return (
     <>
       <section className="card">
@@ -369,7 +438,21 @@ function HoardBrowser({ onError }: { onError: (e: unknown) => void }) {
             {busy ? "…" : t("mods.search")}
           </button>
         </div>
-        <p className="muted small">{t("mods.installHint")}</p>
+        <p className="muted small">
+          {slug
+            ? kind === "saves"
+              ? t("mods.noSavesInstall")
+              : t("mods.installInto", { kind: t(`content.kind.${kind}`) })
+            : t("mods.pickInstanceFirst")}
+        </p>
+        {installing && progress && progress.total > 0 && (
+          <p className="muted small" role="status">
+            {t("mods.installing", {
+              mb: (progress.done / 1024 / 1024).toFixed(1),
+              total: (progress.total / 1024 / 1024).toFixed(1),
+            })}
+          </p>
+        )}
       </section>
 
       {hits && hits.length === 0 && <p className="muted">{t("mods.empty")}</p>}
@@ -394,12 +477,41 @@ function HoardBrowser({ onError }: { onError: (e: unknown) => void }) {
             {(p.loaders ?? []).join(" · ")} — {t("mods.downloads", { n: p.downloads })}
           </p>
           {versions[p.id] && (
-            <div className="chips">
-              {versions[p.id].map((v) => (
-                <span key={v.id} className="chip" title={v.version_type}>
-                  {v.version_number}
-                </span>
-              ))}
+            <div className="stack sub">
+              {versions[p.id].slice(0, 20).map((v) => {
+                const listed = v.game_versions ?? [];
+                const mismatch =
+                  !!gameVersion && listed.length > 0 && !listed.includes(gameVersion);
+                return (
+                  <div key={v.id} className="row between">
+                    <span className="small">
+                      <strong>{v.version_number}</strong>
+                      <span className="muted">
+                        {" "}
+                        · {(v.loaders ?? []).join("/") || "—"} · {v.version_type}
+                        {listed.length > 0 ? ` · ${listed.slice(0, 4).join(", ")}` : ""}
+                      </span>
+                      {mismatch && (
+                        <span className="badge off" title={t("mods.incompatible", { game: gameVersion })}>
+                          {t("mods.maybeIncompatible")}
+                        </span>
+                      )}
+                    </span>
+                    <button
+                      type="button"
+                      disabled={!slug || kind === "saves" || installing !== null}
+                      title={slug ? undefined : t("mods.pickInstanceFirst")}
+                      onClick={(e) => {
+                        // 卡片本身是"点开看版本"的按钮，安装不能顺带触发它
+                        e.stopPropagation();
+                        void install(v);
+                      }}
+                    >
+                      {installing === v.id ? "…" : t("mods.install")}
+                    </button>
+                  </div>
+                );
+              })}
             </div>
           )}
         </section>

@@ -64,9 +64,17 @@ const zhCN: Messages = {
   "mods.search": "搜索",
   "mods.empty": "没有匹配的模组",
   "mods.downloads": "{n} 次下载",
-  "mods.online": "从 Hoard 浏览",
-  "mods.installHint":
-    "直接安装到实例是 P2 的最后一步。现在可以先在这里找到模组，下载后用上面的「导入」放进实例。",
+  "mods.online": "从 Hoard 安装",
+  "mods.install": "安装",
+  "mods.installing": "正在下载：{mb} / {total} MB",
+  "mods.installed": "已安装 {name}",
+  "mods.installInto": "装到当前实例的「{kind}」目录。",
+  "mods.pickInstanceFirst": "先在上面选一个实例，才能把内容装进去。",
+  "mods.noSavesInstall": "存档不通过 Hoard 分发；要换世界请用「导入」选一个世界文件夹。",
+  "mods.maybeIncompatible": "可能不兼容",
+  "mods.incompatible": "这个版本没有标明支持 {game}",
+  "mods.incompatibleConfirm":
+    "{version} 没有标明支持 {game}，仍要安装吗？版本不对的 mod 通常会让游戏启动即崩。",
 
   "common.cancel": "取消",
   "nav.logs": "日志",
@@ -236,9 +244,18 @@ const en: Messages = {
   "mods.search": "Search",
   "mods.empty": "No matching mods",
   "mods.downloads": "{n} downloads",
-  "mods.online": "Browse Hoard",
-  "mods.installHint":
-    "Installing straight into an instance is the last step of P2. For now, find the mod here, download it, and use “Import” above to put it in the instance.",
+  "mods.online": "Install from Hoard",
+  "mods.install": "Install",
+  "mods.installing": "Downloading: {mb} / {total} MB",
+  "mods.installed": "Installed {name}",
+  "mods.installInto": "Installs into the current instance's “{kind}” folder.",
+  "mods.pickInstanceFirst": "Pick an instance above before installing content into it.",
+  "mods.noSavesInstall":
+    "Worlds aren't distributed through Hoard; use “Import” with a world folder instead.",
+  "mods.maybeIncompatible": "maybe incompatible",
+  "mods.incompatible": "This version doesn't list {game} as supported",
+  "mods.incompatibleConfirm":
+    "{version} doesn't list {game} as supported. Install anyway? A mod for the wrong version usually crashes the game at startup.",
 
   "common.cancel": "Cancel",
   "nav.logs": "Logs",

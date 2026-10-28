@@ -11,7 +11,7 @@ use tauri::{AppHandle, Emitter, State};
 use tokio::sync::Notify;
 
 use crate::account::{self, Account, AccountView, now_unix};
-use crate::api::{Project, SearchResponse, Version, png_data_url};
+use crate::api::{File as HoardFile, Project, SearchResponse, Version, png_data_url};
 use crate::archive::ZipSummary;
 use crate::config::{self, Config};
 use crate::content::{self, ContentItem, ContentStats, Kind};
@@ -21,7 +21,7 @@ use crate::instance::{self, ArchiveInfo, Instance, InstanceSettings};
 use crate::java::{self, JavaRuntime};
 use crate::launch;
 use crate::meta::{ManifestEntry, MetaClient};
-use crate::net::Downloader;
+use crate::net::{self, Downloader};
 use crate::paths::PathsInfo;
 use crate::runner;
 use crate::state::{AppState, CopyProgress, GameExit, RunningGame};
@@ -169,6 +169,88 @@ pub async fn hoard_versions(
 ) -> Result<Vec<Version>, Error> {
     let base = state.config.read().await.hoard_url.clone();
     state.api.hoard_versions(&base, &project_id).await
+}
+
+/// 从 Hoard 装一个文件进实例的内容目录。进度并入 `compass://progress`（与版本下载同一条通道）。
+///
+/// `file` 直接收 Hoard 返回的文件对象：校验和从 `hashes` 里挑哪一个是**这里的**决定，
+/// 不该让每个调用方各挑一遍（UI 挑错了就是静默地不校验）。
+///
+/// 两处输入来自**服务端**，都要按不可信处理：
+/// - `file.filename`：一个被攻陷的 Hoard 返回 `../../evil.jar` 就是一次任意写入，
+///   所以走与本地导入完全相同的 `content::validate_file_name`（规则只有一处）。
+/// - `file.url`：只允许 http/https。别的 scheme 一律拒绝——启动器跑在用户自己的网络位置上，
+///   不该替远端去访问 `file://` 或内网地址。
+#[tauri::command]
+pub async fn hoard_install(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    slug: String,
+    kind: Kind,
+    file: HoardFile,
+) -> Result<ContentItem, Error> {
+    require_stopped(&state, &slug).await?;
+    content::validate_file_name(&file.filename)?;
+    let parsed =
+        url::Url::parse(&file.url).map_err(|e| Error::Url(format!("{}: {e}", file.url)))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(Error::Url(format!(
+            "refusing to download from a {} URL: {}",
+            parsed.scheme(),
+            file.url
+        )));
+    }
+    if kind == Kind::Saves {
+        return Err(Error::Invalid(
+            "worlds are not distributed through Hoard; import a world folder instead".into(),
+        ));
+    }
+
+    let cfg = state.config.read().await.clone();
+    let game = instance::game_dir(&state.paths, &slug)?;
+    let dest_dir = content::ensure_dir(&game, kind)?;
+    let dest = dest_dir.join(&file.filename);
+    // 与本地导入同一条规则：不覆盖。覆盖一个已经装好的 mod 无法撤销
+    if dest.exists() {
+        return Err(Error::Invalid(format!(
+            "{} already exists in {} (先删除或改名)",
+            file.filename,
+            kind.dir_name()
+        )));
+    }
+
+    let dl = Downloader::new(
+        state.http.clone(),
+        cfg.download.concurrency,
+        cfg.download.mirror.clone(),
+    );
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let emitter = app.clone();
+    let forwarder = tokio::spawn(async move {
+        while let Some(p) = rx.recv().await {
+            let _ = emitter.emit(PROGRESS_EVENT, p);
+        }
+    });
+    let task = net::FileTask {
+        url: file.url.clone(),
+        dest: dest.clone(),
+        // 空串 = 来源没给校验和，下载器据此跳过校验而不是拿空串当哈希
+        sha1: file.hashes.get("sha1").cloned().unwrap_or_default(),
+        size: file.size.max(0) as u64,
+    };
+    let summary = dl.download_all(vec![task], Some(tx)).await;
+    let _ = forwarder.await;
+
+    if !summary.failed.is_empty() {
+        // 内容目录里不留半成品：`.part` 会被扫描过滤掉，但留着只会白占磁盘
+        let _ = std::fs::remove_file(net::part_path(&dest));
+        let _ = std::fs::remove_file(&dest);
+        return Err(Error::Config(format!(
+            "download failed: {}",
+            summary.failed.join("; ")
+        )));
+    }
+    content::item_for(&game, kind, &dest, true)
 }
 
 // ---------------------------------------------------------------------------

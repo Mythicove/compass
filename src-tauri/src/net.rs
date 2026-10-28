@@ -93,10 +93,16 @@ pub struct FileTask {
 impl FileTask {
     /// `.part` 落点：下载与校验都发生在这里，成功后才 rename。
     pub fn part_path(&self) -> PathBuf {
-        let mut s = self.dest.as_os_str().to_os_string();
-        s.push(".part");
-        PathBuf::from(s)
+        part_path(&self.dest)
     }
+}
+
+/// `.part` 落点规则（只有一处）：调用方在下载失败后要清掉半成品，
+/// 而"半成品叫什么名字"不该由调用方自己拼一遍。
+pub fn part_path(dest: &Path) -> PathBuf {
+    let mut s = dest.as_os_str().to_os_string();
+    s.push(".part");
+    PathBuf::from(s)
 }
 
 /// 单个文件的下载进度（UI 用它画总进度与当前文件明细）。

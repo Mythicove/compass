@@ -311,6 +311,9 @@ export const ipc = {
     invoke<SearchResult<HoardProject>>("hoard_search", { q, offset, limit }),
   hoardVersions: (projectId: string) =>
     invoke<HoardVersion[]>("hoard_versions", { projectId }),
+  /** 装进实例的内容目录。校验和由 Rust 从 file.hashes 里挑，不在前端挑 */
+  hoardInstall: (slug: string, kind: ContentKind, file: HoardFile) =>
+    invoke<ContentItem>("hoard_install", { slug, kind, file }),
 
   // ---- 版本与安装 ----
   versionsList: (includeSnapshots: boolean) =>
