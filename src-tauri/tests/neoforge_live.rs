@@ -41,7 +41,11 @@ async fn installs_neoforge_for_real() {
     };
     let paths = Paths::new(data);
     paths.ensure().unwrap();
-    let http = reqwest::Client::new();
+    // 用 lib 自己的 http_client()，不要在测试里 `reqwest::Client::new()`：
+    // tauri 依赖 reqwest 0.13 而我们用 0.12，图里两份并存时测试目标里的
+    // `reqwest::Client` 名字有歧义（CI 上就因此编不过），而且裸建的 client
+    // 没有生产那份的超时与 User-Agent，等于没验到真正的配置。
+    let http = compass_lib::api::http_client().unwrap();
     let api = ApiClient::new(http.clone());
     let installer = Installer::new(
         MetaClient::new(http.clone(), String::new()),

@@ -31,7 +31,9 @@ async fn installs_a_real_version_and_produces_a_consistent_launch_plan() {
     let paths = Paths::new(dir.path().join("data"));
     paths.ensure().unwrap();
 
-    let http = reqwest::Client::new();
+    // 见 tests/neoforge_live.rs 里的同一条注释：用 lib 的 http_client()，
+    // 不要在测试里直接 `reqwest::Client::new()`（reqwest 在依赖图里有两份）。
+    let http = compass_lib::api::http_client().unwrap();
     // 官方资源 CDN（resources.download.minecraft.net）在部分网络下整体不可达；
     // 设 COMPASS_SMOKE_MIRROR 可走 BMCLAPI 兼容镜像（顺带把镜像重写这条路径也验了）。
     let mirror = std::env::var("COMPASS_SMOKE_MIRROR").unwrap_or_default();
