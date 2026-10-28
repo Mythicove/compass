@@ -35,7 +35,7 @@ pub fn run() {
         .setup(|app| {
             let paths = Paths::new(app.path().app_data_dir()?);
             paths.ensure().map_err(|e| e.to_string())?;
-            let account = account::load(&paths);
+            let (account, account_warning) = account::load(&paths);
 
             // 配置损坏不阻止启动：用默认值起来，并把原因交给设置页显示一次。
             // 直接崩不该由一个坏 JSON 造成，静默回落又会让用户以为设置"莫名消失"。
@@ -49,6 +49,11 @@ pub fn run() {
                     )),
                 ),
             };
+            // accounts.json 损坏的警告走同一机制（文件本身保留，见 account::load）
+            let warning = match (warning, account_warning) {
+                (Some(a), Some(b)) => Some(format!("{a}\n{b}")),
+                (a, b) => a.or(b),
+            };
 
             let http = api::http_client().map_err(|e| e.to_string())?;
             let api = ApiClient::new(http.clone());
@@ -60,7 +65,6 @@ pub fn run() {
             commands::set_config,
             commands::paths_info,
             commands::take_startup_warning,
-            commands::auth_status,
             commands::auth_login,
             commands::auth_logout,
             commands::auth_check,
@@ -73,7 +77,6 @@ pub fn run() {
             commands::instance_list,
             commands::instance_create,
             commands::instance_delete,
-            commands::instance_ready,
             commands::instance_java,
             commands::instance_launch,
             commands::instance_stop,

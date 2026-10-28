@@ -185,8 +185,19 @@ fn user_local_java_roots() -> Option<Vec<PathBuf>> {
 /// 实测一个 java 可执行文件的版本。`java -version` 的输出在 **stderr**（历史包袱），
 /// 两处都读一遍更稳妥。
 pub async fn probe(path: &Path) -> Option<JavaRuntime> {
-    // -Xshare:off 避免某些 JDK 在无写权限目录时报警告；-version 不会真的启动 JVM
-    let out = Command::new(path).arg("-version").output().await.ok()?;
+    // 探测必须限时：网络盘上的 java.exe、坏掉的 JDK 都可能让进程永远挂着，
+    // 而 find() 是挨个候选探测的——一个挂死就卡住整次启动。超时按不可用处理。
+    let out = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        Command::new(path).arg("-version").output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    // 退出码非零 = 这个 java 自己都跑不起来，输出不可信
+    if !out.status.success() {
+        return None;
+    }
     let text = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stderr),

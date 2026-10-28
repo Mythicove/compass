@@ -1,32 +1,13 @@
-import { useEffect, useRef, useState } from "react";
-import { listen } from "@tauri-apps/api/event";
+import { useEffect, useRef } from "react";
 import { useI18n } from "../i18n";
-import { EVENTS, type GameExit, type LogLine } from "../lib/ipc";
+import { clearGameLogs, useGameLogs } from "../App";
 
-/** 只留最近这么多行：游戏日志能跑到几万行，全留在内存里会让界面越来越卡。 */
-const MAX_LINES = 1500;
-
+// 日志的订阅与环形缓冲在 App.tsx（应用启动就开始记录，早于本页挂载）；
+// 这里只渲染快照，并通过 useGameLogs 保持实时追加。
 export function LogsView() {
   const { t } = useI18n();
-  const [lines, setLines] = useState<LogLine[]>([]);
-  const [exit, setExit] = useState<GameExit | null>(null);
+  const { lines, exit } = useGameLogs();
   const endRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    const un = [
-      listen<LogLine>(EVENTS.gameLog, (e) => {
-        setLines((prev) => {
-          const next = prev.length >= MAX_LINES ? prev.slice(prev.length - MAX_LINES + 1) : prev.slice();
-          next.push(e.payload);
-          return next;
-        });
-      }),
-      listen<GameExit>(EVENTS.gameExit, (e) => setExit(e.payload)),
-    ];
-    return () => {
-      void Promise.all(un).then((fs) => fs.forEach((f) => f()));
-    };
-  }, []);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ block: "end" });
@@ -36,7 +17,7 @@ export function LogsView() {
     <section className="card">
       <div className="row between">
         <h2>{t("logs.title")}</h2>
-        <button type="button" className="link" onClick={() => { setLines([]); setExit(null); }}>
+        <button type="button" className="link" onClick={clearGameLogs}>
           {t("logs.clear")}
         </button>
       </div>

@@ -148,8 +148,9 @@ impl Downloader {
             return false;
         }
         if task.sha1.is_empty() {
-            // 没有校验和可比，只能以大小为准（大小也没有就认为已就位）
-            return true;
+            // 没有校验和可比，只能以大小为准；两者都没有时，0 字节文件不可能是完整内容，
+            // 视为未就位强制重下（否则一次失败留下的空壳会永远冒充"已下载"）
+            return task.size > 0 || meta.len() > 0;
         }
         sha1_of_file(&task.dest).await.ok().as_deref() == Some(task.sha1.as_str())
     }
@@ -257,7 +258,9 @@ impl Downloader {
             }
         }
         file.flush().await?;
-        Ok(written - resume_from)
+        // 本次实际传输的字节：从 written_start 起算。服务端对 Range 回 200（不支持续传）
+        // 时 written_start=0 而 resume_from=have，减 resume_from 会下溢。
+        Ok(written - written_start)
     }
 
     /// 并发下载一批文件，返回汇总。个别失败不影响其余文件。

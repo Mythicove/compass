@@ -81,6 +81,12 @@ impl Config {
     pub fn sanitize(mut self) -> Result<Self, Error> {
         self.api_url = normalize_base_url(&self.api_url)?;
         self.hoard_url = normalize_base_url(&self.hoard_url)?;
+        // 镜像与 api/hoard 同规则收敛（rewrite_mirror 假定它是干净的基址）；留空 = 官方源
+        self.download.mirror = if self.download.mirror.trim().is_empty() {
+            String::new()
+        } else {
+            normalize_base_url(&self.download.mirror)?
+        };
         self.download.concurrency = self.download.concurrency.clamp(1, 64);
         self.defaults.memory_mb = self.defaults.memory_mb.clamp(512, 65_536);
         if !matches!(self.theme.as_str(), "system" | "dark" | "light") {

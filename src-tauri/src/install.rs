@@ -14,7 +14,7 @@ use crate::assets::{self, AssetIndex};
 use crate::error::Error;
 use crate::meta::MetaClient;
 use crate::net::{Downloader, FileTask, ProgressSink, Summary, format_failures};
-use crate::paths::Paths;
+use crate::paths::{Paths, safe_join};
 use crate::version::{self, Features, LibraryKind, OsInfo, VersionJson};
 
 /// 安装结果：启动所需的一切（合并后的版本 JSON 是启动参数的唯一来源）。
@@ -75,7 +75,7 @@ impl Installer {
         for lib in version::resolve_libraries(merged, os, &Features::new()) {
             tasks.push(FileTask {
                 url: lib.url,
-                dest: self.paths.libraries().join(&lib.path),
+                dest: safe_join(&self.paths.libraries(), &lib.path)?,
                 sha1: lib.sha1,
                 size: lib.size,
             });
@@ -85,7 +85,7 @@ impl Installer {
         if let Some(logging) = merged.logging.as_ref().and_then(|l| l.client.as_ref()) {
             tasks.push(FileTask {
                 url: logging.file.url.clone(),
-                dest: self.version_dir(id).join(&logging.file.id),
+                dest: safe_join(&self.version_dir(id), &logging.file.id)?,
                 sha1: logging.file.sha1.clone(),
                 size: logging.file.size,
             });
@@ -237,22 +237,25 @@ pub fn is_excluded(entry: &str, exclude: &[String]) -> bool {
     exclude.iter().any(|prefix| entry.starts_with(prefix))
 }
 
+/// `split_libraries` 的结果：(classpath 上的库, 启动前要解压的 natives jar 及其 exclude)。
+pub type LibrarySplit = (Vec<PathBuf>, Vec<(PathBuf, Vec<String>)>);
+
 /// 把已解析的库列表分成 classpath 与待解压的 natives 两组。
 pub fn split_libraries(
     merged: &VersionJson,
     os: &OsInfo,
     paths: &Paths,
-) -> (Vec<PathBuf>, Vec<(PathBuf, Vec<String>)>) {
+) -> Result<LibrarySplit, Error> {
     let mut classpath = Vec::new();
     let mut natives = Vec::new();
     for lib in version::resolve_libraries(merged, os, &Features::new()) {
-        let path = paths.libraries().join(&lib.path);
+        let path = safe_join(&paths.libraries(), &lib.path)?;
         match lib.kind {
             LibraryKind::Classpath => classpath.push(path),
             LibraryKind::Native { exclude } => natives.push((path, exclude)),
         }
     }
-    (classpath, natives)
+    Ok((classpath, natives))
 }
 
 #[cfg(test)]
@@ -426,7 +429,7 @@ mod tests {
             "10.0",
             crate::version::Arch::X64,
         );
-        let (cp, natives) = split_libraries(&v, &os, &inst.paths);
+        let (cp, natives) = split_libraries(&v, &os, &inst.paths).unwrap();
         assert!(!cp.is_empty());
         assert!(natives.iter().any(|(p, exclude)| {
             p.to_string_lossy()
@@ -439,7 +442,7 @@ mod tests {
         // 三个平台的条数各不相同（113 条里被 rules 刷掉的数量不同），钉死具体数字：
         // 规则求值一旦回归，这里会立刻炸，而不是等到游戏里少个 natives 才神秘崩溃。
         let modern = parse("1.21.4", include_str!("../tests/fixtures/1.21.4.json"));
-        let (cp2, natives2) = split_libraries(&modern, &os, &inst.paths);
+        let (cp2, natives2) = split_libraries(&modern, &os, &inst.paths).unwrap();
         assert!(natives2.is_empty());
         assert_eq!(cp2.len(), 84, "windows should keep 84 of 113 libraries");
         let mac = OsInfo::new(
@@ -447,13 +450,19 @@ mod tests {
             "14.5",
             crate::version::Arch::Arm64,
         );
-        assert_eq!(split_libraries(&modern, &mac, &inst.paths).0.len(), 77);
+        assert_eq!(
+            split_libraries(&modern, &mac, &inst.paths).unwrap().0.len(),
+            77
+        );
         let nix = OsInfo::new(
             crate::version::OsName::Linux,
             "6.8.0",
             crate::version::Arch::X64,
         );
-        assert_eq!(split_libraries(&modern, &nix, &inst.paths).0.len(), 70);
+        assert_eq!(
+            split_libraries(&modern, &nix, &inst.paths).unwrap().0.len(),
+            70
+        );
     }
 
     #[test]

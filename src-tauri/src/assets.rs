@@ -110,7 +110,9 @@ pub fn virtual_copies(
         .iter()
         .filter_map(|(name, object)| {
             let rel = object_rel_path(&object.hash)?;
-            Some((assets_root.join(rel), root.join(name)))
+            // 逻辑名来自远端索引：拒绝绝对路径与 `..`（同 object_rel_path 的思路，宁缺勿怪）
+            let dst = crate::paths::safe_join(&root, name).ok()?;
+            Some((assets_root.join(rel), dst))
         })
         .collect()
 }

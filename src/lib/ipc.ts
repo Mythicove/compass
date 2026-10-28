@@ -194,7 +194,6 @@ export const ipc = {
   /** 读取一次即清空：启动期的问题只提示一次 */
   takeStartupWarning: () => invoke<string | null>("take_startup_warning"),
 
-  authStatus: () => invoke<AccountView | null>("auth_status"),
   /** 玩家名 + 该玩家的启动器独立密码（不是网站主密码，见 ADR-0012） */
   authLogin: (playerName: string, password: string) =>
     invoke<AccountView>("auth_login", { playerName, password }),
@@ -221,7 +220,6 @@ export const ipc = {
   instanceCreate: (slug: string, name: string, versionId: string) =>
     invoke<Instance>("instance_create", { slug, name, versionId }),
   instanceDelete: (slug: string) => invoke<void>("instance_delete", { slug }),
-  instanceReady: (slug: string) => invoke<boolean>("instance_ready", { slug }),
   /** 这个实例会用哪个 Java；null = 没找到（此时启动会失败，UI 要提前说清楚） */
   instanceJava: (slug: string) => invoke<JavaRuntime | null>("instance_java", { slug }),
 

@@ -91,7 +91,7 @@ async fn installs_a_real_version_and_produces_a_consistent_launch_plan() {
 
     // 4. 命令行自洽：classpath 上每一个条目都必须真的存在
     let os = OsInfo::current();
-    let (classpath, natives) = split_libraries(&merged, &os, &paths);
+    let (classpath, natives) = split_libraries(&merged, &os, &paths).unwrap();
     assert!(!classpath.is_empty());
     let missing_libs: Vec<_> = classpath.iter().filter(|p| !p.is_file()).collect();
     assert!(

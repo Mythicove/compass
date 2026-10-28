@@ -5,6 +5,7 @@
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use sha1::{Digest, Sha1};
 
 use crate::api::api_error;
 use crate::assets::AssetIndex;
@@ -102,11 +103,37 @@ impl MetaClient {
         self.json(url).await
     }
 
+    /// 取清单条目的版本 JSON，**先对字节做 sha1 校验再解析**：
+    /// 清单给了 sha1 却不核对，等于允许镜像/中间人替换版本 JSON——它决定我们
+    /// 下载什么、把什么放进 classpath，是整条安装链的信任根。
+    pub async fn version_for(&self, entry: &ManifestEntry) -> Result<VersionJson, Error> {
+        let url = rewrite_mirror(&entry.url, &self.mirror);
+        let res = self.http.get(&url).send().await?;
+        let status = res.status().as_u16();
+        let bytes = res.bytes().await?;
+        if !(200..300).contains(&status) {
+            return Err(api_error(status, &String::from_utf8_lossy(&bytes)));
+        }
+        if !entry.sha1.is_empty() {
+            let mut hasher = Sha1::new();
+            hasher.update(&bytes);
+            let actual = hex::encode(hasher.finalize());
+            if actual != entry.sha1 {
+                return Err(Error::Checksum(format!(
+                    "{}: want {} got {actual}",
+                    entry.url, entry.sha1
+                )));
+            }
+        }
+        serde_json::from_slice(&bytes)
+            .map_err(|e| Error::Config(format!("decode {}: {e}", entry.url)))
+    }
+
     /// 递归解析继承链：子版本在前，返回 `(已合并的版本, 链上每个版本的原始 JSON 顺序)`。
     /// 深度上限防环——loader 生成的 JSON 正常只有一层，但坏数据不该让启动器无限递归。
     pub async fn resolve_version(&self, entry: &ManifestEntry) -> Result<VersionJson, Error> {
         const MAX_DEPTH: usize = 8;
-        let mut current = self.version(&entry.url).await?;
+        let mut current = self.version_for(entry).await?;
         for _ in 0..MAX_DEPTH {
             let Some(parent_id) = current.inherits_from.clone() else {
                 return Ok(current);
@@ -117,7 +144,7 @@ impl MetaClient {
             let parent = manifest
                 .by_id(&parent_id)
                 .ok_or_else(|| Error::Invalid(format!("unknown parent version: {parent_id}")))?;
-            let parent_json = self.version(&parent.url).await?;
+            let parent_json = self.version_for(parent).await?;
             current = crate::version::merge(parent_json, current);
         }
         Err(Error::Invalid(format!(

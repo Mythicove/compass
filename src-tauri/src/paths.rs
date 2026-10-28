@@ -5,11 +5,33 @@
 //! Linux $XDG_DATA_HOME），不自己拼平台路径；测试用 `Paths::new(临时目录)` 注入，
 //! 因此本模块没有任何"只有测试会设"的字段。
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde::Serialize;
 
 use crate::error::Error;
+
+/// 把来自外部数据（版本 JSON、资源索引）的相对路径安全地拼到 root 下。
+/// 空串、绝对路径与任何 `..` 都拒绝：远端 JSON 不该有能力把文件写到数据目录之外。
+pub fn safe_join(root: &Path, rel: &str) -> Result<PathBuf, Error> {
+    if rel.is_empty() {
+        return Err(Error::Invalid("empty relative path".into()));
+    }
+    let path = Path::new(rel);
+    if path.is_absolute() {
+        return Err(Error::Invalid(format!(
+            "absolute path is not allowed under {}: {rel:?}",
+            root.display()
+        )));
+    }
+    if path.components().any(|c| matches!(c, Component::ParentDir)) {
+        return Err(Error::Invalid(format!(
+            "path escapes its root {}: {rel:?}",
+            root.display()
+        )));
+    }
+    Ok(root.join(path))
+}
 
 #[derive(Debug, Clone)]
 pub struct Paths {
@@ -124,6 +146,22 @@ mod tests {
         assert!(p.libraries().starts_with(p.cache()));
         assert!(p.versions().starts_with(p.cache()));
         assert!(p.instances().starts_with(p.root()));
+    }
+
+    #[test]
+    fn safe_join_rejects_escape_attempts() {
+        let root = Path::new("/data/cache/libraries");
+        assert_eq!(
+            safe_join(root, "org/lwjgl/x.jar").unwrap(),
+            PathBuf::from("/data/cache/libraries/org/lwjgl/x.jar")
+        );
+        assert!(safe_join(root, "../escape.jar").is_err());
+        assert!(safe_join(root, "org/../../escape.jar").is_err());
+        assert!(safe_join(root, "").is_err());
+        #[cfg(windows)]
+        assert!(safe_join(root, r"C:\Windows\system32\x.dll").is_err());
+        #[cfg(not(windows))]
+        assert!(safe_join(root, "/etc/passwd").is_err());
     }
 
     #[test]

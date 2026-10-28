@@ -1,6 +1,15 @@
 import { createContext, useCallback, useContext, useEffect, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { I18nProvider, detectLocale, errorKey, useI18n, type Locale } from "./i18n";
-import { ipc, toIpcError, type AccountView, type Config } from "./lib/ipc";
+import {
+  EVENTS,
+  ipc,
+  toIpcError,
+  type AccountView,
+  type Config,
+  type GameExit,
+  type LogLine,
+} from "./lib/ipc";
 import { HomeView } from "./views/home";
 import { InstancesView } from "./views/instances";
 import { ModsView } from "./views/mods";
@@ -9,6 +18,48 @@ import { LogsView } from "./views/logs";
 import "./App.css";
 
 type View = "home" | "instances" | "mods" | "logs" | "settings";
+
+// 游戏日志的模块级环形缓冲：订阅在 App 挂载就开始，早于用户打开日志页——
+// 否则启动头几秒的输出（往往正是崩溃原因）会丢。
+const LOG_CAP = 2000;
+const logState: { lines: LogLine[]; exit: GameExit | null } = { lines: [], exit: null };
+const logListeners = new Set<() => void>();
+
+function notifyLogListeners() {
+  for (const fn of logListeners) fn();
+}
+
+export interface GameLogsSnapshot {
+  lines: LogLine[];
+  exit: GameExit | null;
+}
+
+export function snapshotGameLogs(): GameLogsSnapshot {
+  return { lines: logState.lines.slice(), exit: logState.exit };
+}
+
+export function clearGameLogs() {
+  logState.lines = [];
+  logState.exit = null;
+  notifyLogListeners();
+}
+
+/** LogsView 用它渲染：首帧拿到缓冲快照，之后每次追加/清空都会重新渲染。 */
+export function useGameLogs(): GameLogsSnapshot {
+  const [snapshot, setSnapshot] = useState(snapshotGameLogs);
+  useEffect(
+    () => {
+      const update = () => setSnapshot(snapshotGameLogs());
+      logListeners.add(update);
+      update(); // 挂载前的行也要拿到
+      return () => {
+        logListeners.delete(update);
+      };
+    },
+    [],
+  );
+  return snapshot;
+}
 
 const VIEWS: { id: View; labelKey: string }[] = [
   { id: "home", labelKey: "nav.home" },
@@ -148,6 +199,26 @@ export default function App() {
   const [locale, setLocale] = useState<Locale>(() => detectLocale(""));
 
   useTheme(config?.theme);
+
+  // 日志/退出事件在这里订阅（而不是 LogsView）：日志页没打开时输出也进缓冲
+  useEffect(() => {
+    const un = [
+      listen<LogLine>(EVENTS.gameLog, (e) => {
+        logState.lines.push(e.payload);
+        if (logState.lines.length > LOG_CAP) {
+          logState.lines.splice(0, logState.lines.length - LOG_CAP);
+        }
+        notifyLogListeners();
+      }),
+      listen<GameExit>(EVENTS.gameExit, (e) => {
+        logState.exit = e.payload;
+        notifyLogListeners();
+      }),
+    ];
+    return () => {
+      void Promise.all(un).then((fs) => fs.forEach((f) => f()));
+    };
+  }, []);
 
   useEffect(() => {
     ipc

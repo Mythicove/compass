@@ -91,7 +91,11 @@ impl ApiClient {
 
     /// 取皮肤 PNG。无皮肤时 Mirror 返回 404，此处映射为 `None`（前端回落内置默认皮肤）。
     pub async fn skin_png(&self, base: &str, name: &str) -> Result<Option<Vec<u8>>, Error> {
-        let res = self.http.get(format!("{base}/skin/{name}")).send().await?;
+        let res = self
+            .http
+            .get(join_path(base, &["skin", name])?)
+            .send()
+            .await?;
         match res.status().as_u16() {
             200 => Ok(Some(res.bytes().await?.to_vec())),
             404 => Ok(None),
@@ -128,7 +132,7 @@ impl ApiClient {
     ) -> Result<Vec<Version>, Error> {
         let res = self
             .http
-            .get(format!("{base}/v2/project/{project_id}/version"))
+            .get(join_path(base, &["v2", "project", project_id, "version"])?)
             .send()
             .await?;
         self.json_or_error(res).await
@@ -156,6 +160,21 @@ impl ApiClient {
         }
         serde_json::from_str(&text).map_err(|e| Error::Config(format!("decode response: {e}")))
     }
+}
+
+/// 把动态值按 URL 路径段百分号编码后拼进地址。name/project_id 来自 UI 与后端数据，
+/// 直接内插等于让它们改写请求目标（`../`、`?`、`#`、`/` 都有 URL 语义）。
+fn join_path(base: &str, segments: &[&str]) -> Result<String, Error> {
+    let mut url = url::Url::parse(base).map_err(|e| Error::Url(format!("{base:?}: {e}")))?;
+    {
+        let mut paths = url
+            .path_segments_mut()
+            .map_err(|_| Error::Url(format!("not a usable base url: {base:?}")))?;
+        for seg in segments {
+            paths.push(seg);
+        }
+    }
+    Ok(url.to_string())
 }
 
 /// 把非 2xx 变成 `Error::Api`，并尽量抽出**稳定错误码**。
@@ -312,6 +331,20 @@ mod tests {
             Error::Api { code, .. } => assert!(code.is_empty()),
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[test]
+    fn path_segments_are_escaped_not_interpolated() {
+        assert_eq!(
+            join_path("https://mirror.example.com", &["skin", "Alice"]).unwrap(),
+            "https://mirror.example.com/skin/Alice"
+        );
+        // `../` 与查询符必须被编码成字面量，不能改写路径或带上 query
+        let evil = join_path("https://mirror.example.com", &["skin", "../../admin?x=1"]).unwrap();
+        assert!(evil.starts_with("https://mirror.example.com/skin/"));
+        assert!(!evil.contains("/admin"), "{evil}");
+        assert!(evil.contains("%2F") || evil.contains("%3F"), "{evil}");
+        assert!(join_path("not a url", &["x"]).is_err());
     }
 
     #[test]

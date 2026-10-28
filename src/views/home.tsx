@@ -2,7 +2,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useI18n } from "../i18n";
 import { useConfig } from "../App";
-import { ipc, type AccountView } from "../lib/ipc";
+import { ipc, type AccountView, type Instance } from "../lib/ipc";
 import { SkinPreview } from "../components/skin-preview";
 
 interface Props {
@@ -18,6 +18,23 @@ export function HomeView({ account, checking, onSignIn }: Props) {
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [skinUrl, setSkinUrl] = useState<string | null>(null);
+  const [instances, setInstances] = useState<Instance[] | null>(null);
+
+  // 首页只做概览：有实例就列名字与版本，管理操作都在「实例」页
+  useEffect(() => {
+    let cancelled = false;
+    void ipc
+      .instanceList()
+      .then((list) => {
+        if (!cancelled) setInstances(list);
+      })
+      .catch(() => {
+        if (!cancelled) setInstances([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // 皮肤纹理由 Rust 取回并转成 data: URL：webview 不直连后端，CSP 的 img-src 也就不用放行外站
   useEffect(() => {
@@ -109,7 +126,18 @@ export function HomeView({ account, checking, onSignIn }: Props) {
 
       <section className="card span-2">
         <h2>{t("home.instances")}</h2>
-        <p className="muted">{t("home.noInstances")}</p>
+        {instances && instances.length > 0 ? (
+          <div className="stack">
+            {instances.map((inst) => (
+              <div key={inst.slug} className="row between">
+                <strong>{inst.name}</strong>
+                <span className="muted small">{inst.versionId}</span>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="muted">{t("home.noInstances")}</p>
+        )}
       </section>
     </div>
   );

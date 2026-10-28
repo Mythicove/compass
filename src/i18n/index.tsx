@@ -27,7 +27,7 @@ const zhCN: Messages = {
 
   "home.skinPreview": "皮肤预览",
   "home.instances": "我的实例",
-  "home.noInstances": "还没有实例。原生启动将在下一个里程碑（P1）落地：解析版本、下载资源与库、拉起 Minecraft。",
+  "home.noInstances": "还没有实例。到「实例」页新建一个，装好版本即可启动。",
 
   "mods.searchPlaceholder": "搜索模组…",
   "mods.search": "搜索",
@@ -62,7 +62,7 @@ const zhCN: Messages = {
   "instances.working": "处理中…",
 
   "logs.title": "游戏日志",
-  "logs.hint": "实时显示游戏进程的 stdout/stderr（只保留最近 1500 行）。崩溃诊断规则库随 P5 落地。",
+  "logs.hint": "实时显示游戏进程的 stdout/stderr（只保留最近 2000 行，应用启动即开始记录）。崩溃诊断规则库随 P5 落地。",
   "logs.clear": "清空",
   "logs.empty": "还没有日志。启动一个实例后这里会实时显示游戏输出。",
   "logs.exited": "{instance} 已退出，退出码 {code}。",
@@ -124,7 +124,7 @@ const en: Messages = {
   "home.skinPreview": "Skin preview",
   "home.instances": "My instances",
   "home.noInstances":
-    "No instances yet. Native launch lands in the next milestone (P1): parse versions, download assets and libraries, start Minecraft.",
+    "No instances yet. Create one on the Instances page — install a version and launch it.",
 
   "mods.searchPlaceholder": "Search mods…",
   "mods.search": "Search",
@@ -159,7 +159,7 @@ const en: Messages = {
   "instances.working": "Working…",
 
   "logs.title": "Game log",
-  "logs.hint": "Live stdout/stderr from the game process (last 1500 lines kept). Crash-analysis rules land with P5.",
+  "logs.hint": "Live stdout/stderr from the game process (last 2000 lines kept, recorded from app start). Crash-analysis rules land with P5.",
   "logs.clear": "Clear",
   "logs.empty": "No log yet. Launch an instance and its output shows up here live.",
   "logs.exited": "{instance} exited with code {code}.",

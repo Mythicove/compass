@@ -8,7 +8,7 @@ Mythicove 生态的 Minecraft 启动器（Tauri 2 + React 前端，Rust 核心�
 
 开发按阶段计划推进：[Compass 启动器开发计划](https://docs.gov.skin/plans/compass-launcher/)（P0 → P6，目标是三平台上达到 HMCL/PCL 级能力）；进度见[当前进度页](https://docs.gov.skin/plans/status/)。
 
-**目前还不能启动 Minecraft。** 原生启动所需的 Rust 核心已经落地并用真实数据做了契约测试，缺的是围绕它的命令层与 UI 接线（建实例 → 安装 → 启动 → 日志）。
+**原生启动已在 P1 全链路接通。** Rust 核心用真实版本数据做了契约测试，围绕它的命令层与 UI 接线（建实例 → 安装 → 启动 → 实时日志）也已就位。按计划剩余：自动更新（**P5**）与 CI 的三平台签名打包发布（**P6**）。
 
 已实现：
 
@@ -27,7 +27,7 @@ Mythicove 生态的 Minecraft 启动器（Tauri 2 + React 前端，Rust 核心�
   - `launch.rs`：JVM 参数 → 主类 → 游戏参数；1.7–1.18.1 的 Log4Shell 缓解；那个**不在** `arguments.jvm` 里的 `logging.client.argument`；老版本 macOS 的 `-XstartOnFirstThread`；带 zip-slip 防护的 natives 解压；同时读 stdout 与 stderr 的日志转发。
   - `instance.rs`：每实例一个 `instance.json` + 独立 `.minecraft`，slug 校验挡住路径穿越。
 
-尚未实现（按阶段）：建实例/安装/启动的接线与进度 UI（**P1 剩余**）、实例与 mod/资源包管理（**P2**）、mod loader 与整合包（**P3**）、多账号与钥匙串存储（**P4**）、崩溃诊断、Java 自动下载与自动更新（**P5**）、三平台签名打包与发布（**P6**）。
+尚未实现（按阶段）：实例与 mod/资源包管理（**P2**）、mod loader 与整合包（**P3**）、多账号与钥匙串存储（**P4**）、崩溃诊断、Java 自动下载与自动更新（**P5**）、三平台签名打包与发布（**P6**）。
 
 原先"把 `.mrpack` 交给 Prism Launcher"的路径是**直接删掉**而不是与新路径并存——只留一条启动路径。
 
@@ -46,7 +46,7 @@ pnpm tauri build    # 打包
 
 ```bash
 cd src-tauri
-cargo test                                   # 81 个单元/契约测试，离线可跑
+cargo test                                   # 94 个单元/契约测试，离线可跑
 cargo test --test install_smoke -- --ignored # 真下载约 550MB 装一个 1.21.4（需联网）
 ```
 

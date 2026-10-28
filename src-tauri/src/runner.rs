@@ -77,7 +77,7 @@ pub fn build(input: &LaunchInput) -> Result<LaunchPlan, Error> {
         )));
     }
 
-    let (classpath, _) = split_libraries(input.version, input.os, input.paths);
+    let (classpath, _) = split_libraries(input.version, input.os, input.paths)?;
     if classpath.is_empty() {
         return Err(Error::Config(format!(
             "version {} resolved to an empty classpath (安装不完整？)",
@@ -151,8 +151,8 @@ pub fn build(input: &LaunchInput) -> Result<LaunchPlan, Error> {
 }
 
 /// natives 解压清单（每次启动前重建）。
-pub fn natives_to_extract(input: &LaunchInput) -> Vec<(PathBuf, Vec<String>)> {
-    split_libraries(input.version, input.os, input.paths).1
+pub fn natives_to_extract(input: &LaunchInput) -> Result<Vec<(PathBuf, Vec<String>)>, Error> {
+    Ok(split_libraries(input.version, input.os, input.paths)?.1)
 }
 
 /// 一次启动所需的全部产物：命令行 + 用哪个 Java。
@@ -220,7 +220,7 @@ pub async fn prepare_launch(
         prefetched_meta: prefetched.clone(),
     };
     let plan = build(&input)?;
-    let natives = natives_to_extract(&input);
+    let natives = natives_to_extract(&input)?;
     let natives_dir = instance::natives_dir(paths, &inst.slug)?;
     launch::extract_natives(&natives, &natives_dir)?;
     // 以命令行里真的有 -javaagent 为准（而不是"我们下载到了 jar"）：
@@ -478,10 +478,14 @@ mod tests {
         };
         let account = sample_account();
         assert!(
-            natives_to_extract(&input(&paths, &modern, &instance, &account, &win())).is_empty()
+            natives_to_extract(&input(&paths, &modern, &instance, &account, &win()))
+                .unwrap()
+                .is_empty()
         );
         assert!(
-            !natives_to_extract(&input(&paths, &legacy, &instance, &account, &win())).is_empty()
+            !natives_to_extract(&input(&paths, &legacy, &instance, &account, &win()))
+                .unwrap()
+                .is_empty()
         );
     }
 }

@@ -109,8 +109,9 @@ pub async fn auth_logout(state: State<'_, Arc<AppState>>) -> Result<(), Error> {
     account::clear(&state.paths)
 }
 
-/// 校验本地令牌是否仍然有效；无效则清掉登录态。
-/// 网络错误**不**视为登出（离线启动不该把人踢出去），原样返回让前端提示。
+/// 校验本地令牌是否仍然有效；只有服务端明确判定令牌无效（401/403）才清登录态。
+/// 其余一切错误（网络、后端 5xx、响应解码失败）都保留会话：
+/// 离线启动不该把人踢出去，一次抖动也不该逼用户重新登录。
 #[tauri::command]
 pub async fn auth_check(state: State<'_, Arc<AppState>>) -> Result<Option<AccountView>, Error> {
     let current = state.account.read().await.clone();
@@ -123,12 +124,14 @@ pub async fn auth_check(state: State<'_, Arc<AppState>>) -> Result<Option<Accoun
         .await
     {
         Ok(()) => Ok(Some(a.view())),
-        Err(Error::Http(_)) => Ok(Some(a.view())),
-        Err(_) => {
+        Err(Error::Api {
+            status: 401 | 403, ..
+        }) => {
             *state.account.write().await = None;
             account::clear(&state.paths)?;
             Ok(None)
         }
+        Err(_) => Ok(Some(a.view())),
     }
 }
 

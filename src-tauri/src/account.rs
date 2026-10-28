@@ -14,13 +14,19 @@ use crate::paths::Paths;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Account {
+    #[serde(default)]
     pub player_name: String,
+    #[serde(default)]
     pub player_uuid: String,
+    #[serde(default)]
     pub access_token: String,
+    #[serde(default)]
     pub client_token: String,
     /// 登录时用的 Mirror 地址：换了站点旧令牌自然作废，不该跨站混用。
+    #[serde(default)]
     pub api_url: String,
     /// Unix 秒。不用字符串是为了不引日期库，格式化交给前端。
+    #[serde(default)]
     pub signed_in_at: u64,
 }
 
@@ -52,16 +58,22 @@ pub fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
-/// 读取已登录账号。文件不存在 = 未登录；损坏则视为未登录并**删掉**这个文件：
-/// 账号状态是可重建的（重新登录即可），不该让一个坏文件把启动器卡在错误页上。
-pub fn load(paths: &Paths) -> Option<Account> {
-    let text = fs::read_to_string(paths.accounts_file()).ok()?;
+/// 读取已登录账号。文件不存在 = 未登录；损坏则视为未登录，但**保留文件**并返回一条
+/// 启动警告（走 compass.json 损坏时的同一机制）：静默删掉会把"账号怎么没了"的取证
+/// 线索一起销毁，重新登录本来就不依赖这个文件。
+pub fn load(paths: &Paths) -> (Option<Account>, Option<String>) {
+    let Ok(text) = fs::read_to_string(paths.accounts_file()) else {
+        return (None, None);
+    };
     match serde_json::from_str::<Account>(&text) {
-        Ok(a) => Some(a),
-        Err(_) => {
-            let _ = fs::remove_file(paths.accounts_file());
-            None
-        }
+        Ok(a) => (Some(a), None),
+        Err(e) => (
+            None,
+            Some(format!(
+                "{} 无法解析，已视为未登录（文件原样保留以便排查）：{e}",
+                paths.accounts_file().display()
+            )),
+        ),
     }
 }
 
@@ -73,6 +85,12 @@ pub fn save(paths: &Paths, account: &Account) -> Result<(), Error> {
     // 原子写：与 compass.json 同一套理由（写一半断电不该留下半截 JSON）
     let tmp = paths.accounts_file().with_extension("json.tmp");
     fs::write(&tmp, json)?;
+    // 令牌文件在 rename 前就收紧权限：同机其他用户不该在任何时刻读到它
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))?;
+    }
     fs::rename(&tmp, paths.accounts_file())?;
     Ok(())
 }
@@ -105,9 +123,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::new(dir.path());
         paths.ensure().unwrap();
-        assert!(load(&paths).is_none());
+        assert!(load(&paths).0.is_none());
         save(&paths, &sample()).unwrap();
-        let got = load(&paths).unwrap();
+        let got = load(&paths).0.unwrap();
         assert_eq!(got.access_token, "secret-access");
         assert_eq!(got.player_name, "Alice");
     }
@@ -120,13 +138,19 @@ mod tests {
     }
 
     #[test]
-    fn corrupt_file_is_dropped_not_fatal() {
+    fn corrupt_file_is_kept_and_reported_not_deleted() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::new(dir.path());
         paths.ensure().unwrap();
         fs::write(paths.accounts_file(), "{ nope").unwrap();
-        assert!(load(&paths).is_none());
-        assert!(!paths.accounts_file().exists());
+        let (account, warning) = load(&paths);
+        assert!(account.is_none());
+        // 视为未登录，但文件保留（取证）、警告走 startup_warning 机制
+        assert!(paths.accounts_file().exists());
+        assert!(
+            warning.as_ref().is_some_and(|w| w.contains("无法解析")),
+            "{warning:?}"
+        );
     }
 
     #[test]
@@ -137,6 +161,6 @@ mod tests {
         clear(&paths).unwrap();
         save(&paths, &sample()).unwrap();
         clear(&paths).unwrap();
-        assert!(load(&paths).is_none());
+        assert!(load(&paths).0.is_none());
     }
 }

@@ -8,7 +8,7 @@ Minecraft launcher for the Mythicove ecosystem (Tauri 2 + React frontend, Rust c
 
 Development follows a phased plan — [Compass launcher development plan](https://docs.gov.skin/plans/compass-launcher/) (P0 → P6, targeting HMCL/PCL-class capability on Windows, macOS and Linux). Progress is tracked on the [status page](https://docs.gov.skin/plans/status/).
 
-**It does not launch Minecraft yet.** The Rust core for native launching is in place and tested against real version data; what is missing is the command/UI wiring around it (create instance → install → launch → logs).
+**Native launch is wired end-to-end (P1).** The Rust core is tested against real version data, and the command/UI chain around it (create instance → install → launch → live logs) is in place. Remaining per plan: auto-update (**P5**) and signed three-platform packaging/release in CI (**P6**).
 
 Implemented so far:
 
@@ -27,7 +27,7 @@ Implemented so far:
   - `launch.rs`: JVM args → main class → game args, Log4Shell mitigation for 1.7–1.18.1, the `logging.client.argument` that is *not* part of `arguments.jvm`, macOS `-XstartOnFirstThread` for legacy versions, natives extraction with zip-slip protection, and log pumping that reads both streams.
   - `instance.rs`: one `instance.json` per instance plus an isolated `.minecraft`, slug validation that blocks traversal.
 
-Not yet implemented, by phase: instance creation/install/launch wiring and progress UI (**rest of P1**), instances and mod/resourcepack management (**P2**), mod loaders and modpacks (**P3**), multi-account and keychain storage (**P4**), crash diagnostics, Java auto-download and self-update (**P5**), signed three-platform packaging and release (**P6**).
+Not yet implemented, by phase: instances and mod/resourcepack management (**P2**), mod loaders and modpacks (**P3**), multi-account and keychain storage (**P4**), crash diagnostics, Java auto-download and self-update (**P5**), signed three-platform packaging and release (**P6**).
 
 The former "hand the `.mrpack` to Prism Launcher" path was deleted rather than kept next to the new one — one launch path, not two.
 
@@ -46,7 +46,7 @@ Server addresses default to `http://localhost:8080` and are editable under Setti
 
 ```bash
 cd src-tauri
-cargo test                                   # 81 unit/contract tests, offline
+cargo test                                   # 94 unit/contract tests, offline
 cargo test --test install_smoke -- --ignored # real ~550MB install of 1.21.4 (network)
 ```
 
