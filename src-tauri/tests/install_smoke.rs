@@ -157,8 +157,85 @@ async fn installs_a_real_version_and_produces_a_consistent_launch_plan() {
         );
     }
 
-    // 6. 可选：真的把游戏拉起来。走 runner::prepare_launch——与 instance_launch 命令
-    //    是同一条代码路径，所以这里验的就是用户会跑到的东西（而不是测试自己重写一遍顺序）。
+    // 6. 实例与内容的往返：建实例 → 放内容 → 导出 → 导入 → 复制。
+    //    这一段不联网也不启动，所以三平台 CI 每次都会跑到。
+    let inst = compass_lib::instance::Instance {
+        slug: "smoke".into(),
+        name: "Smoke".into(),
+        version_id: VERSION.into(),
+        memory_mb: Some(2048),
+        created_at: 0,
+        ..compass_lib::instance::Instance::default()
+    };
+    compass_lib::instance::save(&paths, &inst).unwrap();
+
+    // ---- 导出 → 导入 → 复制，产物都必须仍然是可启动的实例 ----
+    // 真正"能不能启动"由下面的 COMPASS_SMOKE_LAUNCH 分支验证——那里启动的是
+    // **导入出来的**实例，因为验收项写的就是"导出再导入的实例可正常启动"。
+    let game = compass_lib::instance::game_dir(&paths, "smoke").unwrap();
+    std::fs::create_dir_all(game.join("mods")).unwrap();
+    std::fs::write(game.join("mods/fake-mod.jar"), b"fake mod").unwrap();
+    std::fs::create_dir_all(game.join("saves/w")).unwrap();
+    std::fs::write(game.join("saves/w/level.dat"), b"level").unwrap();
+
+    let zip = dir.path().join("smoke-export.zip");
+    let summary = compass_lib::instance::export(&paths, "smoke", &zip, true).unwrap();
+    assert!(
+        summary.files >= 3,
+        "instance.json + mod + level.dat 至少三个条目：{summary:?}"
+    );
+    // 导入前的"看一眼"：只读压缩包，不落盘
+    let info = compass_lib::instance::inspect_archive(&zip).unwrap();
+    assert_eq!(info.version_id, VERSION);
+    assert_eq!(info.files, summary.files);
+
+    let imported_game = compass_lib::instance::game_dir(&paths, "smoke-imported").unwrap();
+    let imported = compass_lib::instance::import(&paths, &zip, "smoke-imported", "").unwrap();
+    assert_eq!(imported.version_id, VERSION, "导入后版本 id 必须还在");
+    assert_eq!(
+        std::fs::read(imported_game.join("mods/fake-mod.jar")).unwrap(),
+        b"fake mod"
+    );
+    assert!(imported_game.join("saves/w/level.dat").is_file());
+    assert_eq!(
+        imported.java_path, None,
+        "别人机器上的 Java 路径必须在导入时清空"
+    );
+    assert_eq!(imported.launches, 0);
+    assert_eq!(imported.last_launched_at, None);
+
+    // 复制出来的实例同样自洽（与导入共用同一套跳过规则）
+    let copied = compass_lib::instance::duplicate(
+        &paths,
+        "smoke-imported",
+        "smoke-copy",
+        "Copy",
+        |done, total| {
+            assert!(done <= total, "进度不能超过总量：{done}/{total}");
+        },
+    )
+    .unwrap();
+    assert_eq!(copied.name, "Copy");
+    let copied_game = compass_lib::instance::game_dir(&paths, "smoke-copy").unwrap();
+    assert!(copied_game.join("mods/fake-mod.jar").is_file());
+    assert!(
+        !compass_lib::instance::instance_dir(&paths, "smoke-copy")
+            .unwrap()
+            .join("natives")
+            .exists(),
+        "natives 每次启动重建，不该被复制/导出"
+    );
+    println!(
+        "instance round-trip ok: exported {} files ({} bytes) → imported {} → copied {}",
+        summary.files, summary.bytes, imported.slug, copied.slug
+    );
+
+    // 启动的是导入出来的实例（见上面的注释：那才是验收项）
+    let inst = imported;
+
+    // 7. 可选：真的把游戏拉起来，启动的是**导入出来的**实例（验收项：导出再导入可正常启动）。
+    //    走 runner::prepare_launch——与 instance_launch 命令是同一条代码路径，
+    //    所以这里验的就是用户会跑到的东西（而不是测试自己重写一遍顺序）。
     if std::env::var("COMPASS_SMOKE_LAUNCH").is_err() {
         return;
     }
@@ -203,16 +280,6 @@ async fn installs_a_real_version_and_produces_a_consistent_launch_plan() {
             signed_in_at: 0,
         },
     };
-
-    let inst = compass_lib::instance::Instance {
-        slug: "smoke".into(),
-        name: "Smoke".into(),
-        version_id: VERSION.into(),
-        memory_mb: Some(2048),
-        created_at: 0,
-        ..compass_lib::instance::Instance::default()
-    };
-    compass_lib::instance::save(&paths, &inst).unwrap();
 
     let prepared = compass_lib::runner::prepare_launch(&paths, &http, &cfg, &inst, &account)
         .await
