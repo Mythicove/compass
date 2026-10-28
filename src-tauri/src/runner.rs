@@ -62,20 +62,28 @@ pub fn build(input: &LaunchInput) -> Result<LaunchPlan, Error> {
         })?
         .to_string();
 
-    // 先查 client jar 再查库：两者都属于"版本没装完"，但 jar 是更根本的那个，
-    // 报它更符合用户的直觉（"这版本没装"而不是"某个 lwjgl 分片不见了"）。
-    let jar_version = input.version.jar_version();
-    let client_jar = input
-        .paths
-        .versions()
-        .join(jar_version)
-        .join(format!("{jar_version}.jar"));
-    if !client_jar.is_file() {
-        return Err(Error::Config(format!(
-            "client jar missing: {} (先安装该版本)",
-            client_jar.display()
-        )));
-    }
+    // 游戏 jar 由谁提供，是**版本 JSON 自己说的**（见 loader_provides_game_jar）：
+    // Forge 1.17+/NeoForge 的 fml_loader 自己按坐标找打过补丁的 jar，
+    // 这时 classpath 里一个游戏 jar 都不能放，否则撞上自动模块重名。
+    let client_jar = if crate::version::loader_provides_game_jar(input.version) {
+        None
+    } else {
+        // 先查 client jar 再查库：两者都属于"版本没装完"，但 jar 是更根本的那个，
+        // 报它更符合用户的直觉（"这版本没装"而不是"某个 lwjgl 分片不见了"）。
+        let jar_version = input.version.jar_version();
+        let path = input
+            .paths
+            .versions()
+            .join(jar_version)
+            .join(format!("{jar_version}.jar"));
+        if !path.is_file() {
+            return Err(Error::Config(format!(
+                "client jar missing: {} (先安装该版本)",
+                path.display()
+            )));
+        }
+        Some(path)
+    };
 
     let (classpath, _) = split_libraries(input.version, input.os, input.paths)?;
     if classpath.is_empty() {
@@ -273,6 +281,12 @@ mod tests {
     /// 把一个版本"装"到临时数据目录里：写版本 JSON、造 client jar 与库文件。
     /// 这样 build() 的存在性检查才有东西可查，测试也不需要联网。
     fn fake_install(paths: &Paths, v: &VersionJson) {
+        fake_install_with(paths, v, true);
+    }
+
+    /// `with_client_jar = false` 用来模拟 NeoForge 那种"游戏 jar 不由启动器提供"的安装：
+    /// 磁盘上确实没有 client jar，而 build() 仍然必须成功。
+    fn fake_install_with(paths: &Paths, v: &VersionJson, with_client_jar: bool) {
         let dir = paths.versions().join(&v.id);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
@@ -280,10 +294,12 @@ mod tests {
             serde_json::to_vec(v).unwrap(),
         )
         .unwrap();
-        let jar_version = v.jar_version().to_string();
-        let jar_dir = paths.versions().join(&jar_version);
-        std::fs::create_dir_all(&jar_dir).unwrap();
-        std::fs::write(jar_dir.join(format!("{jar_version}.jar")), b"fake jar").unwrap();
+        if with_client_jar {
+            let jar_version = v.jar_version().to_string();
+            let jar_dir = paths.versions().join(&jar_version);
+            std::fs::create_dir_all(&jar_dir).unwrap();
+            std::fs::write(jar_dir.join(format!("{jar_version}.jar")), b"fake jar").unwrap();
+        }
         let os = OsInfo::new(OsName::Windows, "10.0", Arch::X64);
         for lib in crate::version::resolve_libraries(v, &os, &crate::version::Features::new()) {
             let p = paths.libraries().join(&lib.path);
@@ -495,6 +511,121 @@ mod tests {
             !natives_to_extract(&input(&paths, &legacy, &instance, &account, &win()))
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    /// NeoForge：磁盘上**没有** client jar，build() 仍然必须成功，
+    /// 而且 classpath 里一个游戏 jar 都不能有。
+    ///
+    /// 这是真跑出来的结论，不是推理：拿官方 installer 的产物启动，
+    /// - classpath 里放原版 `1.21.4.jar` → `Modules _1._21._4 and minecraft export package …`
+    /// - 放补丁 `neoforge-21.4.161-client.jar` → `more than one module named neoforge`
+    ///   （它与 `neoforge-…-universal.jar` 的自动模块名都是 `neoforge`）
+    /// - 只放库 → 一路跑到 `Launching target 'neoforgeclient'`、`Setting user:`、LWJGL 初始化
+    #[test]
+    fn neoforge_plan_carries_no_game_jar_and_needs_none_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path().join("data"));
+        paths.ensure().unwrap();
+        let version = crate::version::merge(
+            parse(include_str!("../tests/fixtures/1.21.4.json")),
+            parse(include_str!("../tests/fixtures/neoforge-21.4.161.json")),
+        );
+        // 故意不写 client jar
+        fake_install_with(&paths, &version, false);
+        assert!(
+            !paths
+                .versions()
+                .join(version.jar_version())
+                .join(format!("{}.jar", version.jar_version()))
+                .exists(),
+            "样本前提：磁盘上没有原版 client jar"
+        );
+
+        let instance = Instance {
+            slug: "nf".into(),
+            version_id: version.id.clone(),
+            ..Instance::default()
+        };
+        instance::save(&paths, &instance).unwrap();
+        let account = sample_account();
+
+        let plan = build(&input(&paths, &version, &instance, &account, &win()))
+            .expect("没有 client jar 也必须能拼出启动计划");
+
+        let cp_idx = plan.args.iter().position(|a| a == "-cp").unwrap();
+        let cp = &plan.args[cp_idx + 1];
+        assert!(
+            !cp.contains("1.21.4.jar"),
+            "原版 jar 不该在 classpath 上（会与 fml 的 minecraft 模块冲突）：{cp}"
+        );
+        assert!(
+            !cp.contains("neoforge-21.4.161-client.jar"),
+            "补丁 jar 也不该在 classpath 上（会与 universal 撞模块名）：{cp}"
+        );
+        // 库照旧要在，而且 asm 只有子版本那一份
+        assert!(cp.contains("asm-9.8.jar"), "{cp}");
+        assert!(!cp.contains("asm-9.6.jar"), "父版本的 asm 该被去重掉：{cp}");
+        assert!(cp.contains("bootstraplauncher"), "{cp}");
+
+        // ModLauncher 的入口参数必须在（少了它 fml_loader 拿到 null 直接 NPE）
+        let lt = plan
+            .args
+            .iter()
+            .position(|a| a == "--launchTarget")
+            .expect("--launchTarget 必须出现在游戏参数里");
+        assert_eq!(plan.args[lt + 1], "neoforgeclient");
+        assert!(plan.args.iter().any(|a| a == "--fml.mcVersion"));
+        // 主类是 BootstrapLauncher，不是原版 Main
+        assert!(
+            plan.args
+                .iter()
+                .any(|a| a == "cpw.mods.bootstraplauncher.BootstrapLauncher")
+        );
+        assert!(!plan.args.iter().any(|a| a.contains("${")));
+    }
+
+    /// 反过来钉住：原版与 Fabric 仍然**要求** client jar 存在（不能因为 NeoForge 放宽就一起放宽）。
+    #[test]
+    fn vanilla_and_fabric_still_require_the_client_jar() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path().join("data"));
+        paths.ensure().unwrap();
+        let version = parse(include_str!("../tests/fixtures/1.21.4.json"));
+        fake_install_with(&paths, &version, false);
+        let instance = Instance {
+            slug: "v".into(),
+            version_id: version.id.clone(),
+            ..Instance::default()
+        };
+        instance::save(&paths, &instance).unwrap();
+        let account = sample_account();
+        let err = build(&input(&paths, &version, &instance, &account, &win())).unwrap_err();
+        assert!(err.to_string().contains("client jar missing"), "{err}");
+
+        // Fabric 同理：Knot 需要原版 jar 在 classpath 上
+        let fabric = crate::version::merge(
+            parse(include_str!("../tests/fixtures/1.21.4.json")),
+            parse(include_str!("../tests/fixtures/fabric-1.21.4.json")),
+        );
+        fake_install_with(&paths, &fabric, false);
+        let finst = Instance {
+            slug: "f".into(),
+            version_id: fabric.id.clone(),
+            ..Instance::default()
+        };
+        instance::save(&paths, &finst).unwrap();
+        let err = build(&input(&paths, &fabric, &finst, &account, &win())).unwrap_err();
+        assert!(err.to_string().contains("client jar missing"), "{err}");
+
+        // 有了 jar 就正常，而且 jar 在 classpath 末尾
+        fake_install(&paths, &fabric);
+        let plan = build(&input(&paths, &fabric, &finst, &account, &win())).unwrap();
+        let cp_idx = plan.args.iter().position(|a| a == "-cp").unwrap();
+        assert!(
+            plan.args[cp_idx + 1].ends_with("1.21.4.jar"),
+            "{}",
+            plan.args[cp_idx + 1]
         );
     }
 }

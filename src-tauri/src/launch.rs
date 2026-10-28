@@ -44,7 +44,10 @@ pub struct LaunchOptions {
     /// 库的 classpath 部分（不含 client jar，jar 由本模块追加到末尾）。
     pub classpath: Vec<PathBuf>,
     pub libraries_root: PathBuf,
-    pub client_jar: PathBuf,
+    /// 原版 client jar。**None 表示不放游戏 jar**：Forge 1.17+/NeoForge 的 fml_loader
+    /// 自己按坐标去 libraries 目录找打过补丁的 jar，启动器再塞一个进去会撞上
+    /// 自动模块重名（见 `version::loader_provides_game_jar`，那里记着实测的三种结果）。
+    pub client_jar: Option<PathBuf>,
     pub java: PathBuf,
     pub memory_mb: u32,
     pub resolution: Option<(u32, u32)>,
@@ -117,8 +120,11 @@ fn substitutions(v: &VersionJson, os: &OsInfo, opts: &LaunchOptions) -> HashMap<
         .iter()
         .map(|p| p.to_string_lossy().into_owned())
         .collect();
-    // client jar 放最后：库在前才能被 loader 的 patch 覆盖
-    cp.push(opts.client_jar.to_string_lossy().into_owned());
+    // client jar 放最后：库在前才能被 loader 的 patch 覆盖。
+    // None = 这个版本的游戏 jar 由 loader 自己提供，classpath 里一个游戏 jar 都不放。
+    if let Some(jar) = &opts.client_jar {
+        cp.push(jar.to_string_lossy().into_owned());
+    }
 
     let mut vars = HashMap::new();
     let mut put = |k: &str, v: String| {
@@ -475,7 +481,7 @@ mod tests {
             asset_index_id: "19".into(),
             classpath: vec![PathBuf::from("/data/cache/libraries/a.jar")],
             libraries_root: PathBuf::from("/data/cache/libraries"),
-            client_jar: PathBuf::from("/data/cache/versions/1.21.4/1.21.4.jar"),
+            client_jar: Some(PathBuf::from("/data/cache/versions/1.21.4/1.21.4.jar")),
             java: PathBuf::from(if cfg!(windows) {
                 r"C:\jdk\bin\java.exe"
             } else {

@@ -118,7 +118,7 @@ async fn installs_a_real_version_and_produces_a_consistent_launch_plan() {
         asset_index_id: installed.asset_index_id.clone(),
         classpath,
         libraries_root: paths.libraries(),
-        client_jar: jar.clone(),
+        client_jar: Some(jar.clone()),
         java: java_path(),
         memory_mb: 2048,
         resolution: None,

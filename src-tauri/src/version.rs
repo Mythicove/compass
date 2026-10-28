@@ -730,6 +730,38 @@ pub fn merge(parent: VersionJson, child: VersionJson) -> VersionJson {
     }
 }
 
+/// 这个版本的游戏 jar 是否**由 loader 自己提供**（而不是由启动器放进 classpath）。
+///
+/// 判据是游戏参数里有没有 `--launchTarget`——那是 ModLauncher 的入口参数，
+/// Forge 1.17+ 与 NeoForge 都走它，而它们的 `fml_loader` 会**自己按坐标**去
+/// libraries 目录找打过补丁的 client jar（启动日志里那句
+/// `Found mod file ... [locator: production client provider +net.neoforged:neoforge:21.4.161:client]`
+/// 就是它干的）。
+///
+/// 这时启动器再往 classpath 里塞任何游戏 jar 都会撞上**自动模块重名**，实测三种组合：
+/// - 加原版 `1.21.4.jar` → `Modules _1._21._4 and minecraft export package net.minecraft.…`
+/// - 加补丁 `neoforge-21.4.161-client.jar` → `Module mixin_synthetic reads more than one
+///   module named neoforge`（它与 `neoforge-…-universal.jar` 的自动模块名都是 `neoforge`；
+///   同理 `client-…-srg.jar` 与 `client-…-extra.jar` 都叫 `client`）
+/// - **只放库、一个游戏 jar 都不加** → NeoForge 一路跑到 `Launching target 'neoforgeclient'`、
+///   `Setting user:` 与 `Backend library: LWJGL version 3.3.3+5`
+///
+/// 用数据判而不是按 loader 名字/版本表判：Fabric 与 Quilt 走 KnotClient，
+/// 必须有原版 jar 在 classpath 上；Forge 1.12 及更早用 `--tweakClass`，同样要原版 jar。
+/// 四种情况这一个判据都对。
+pub fn loader_provides_game_jar(v: &VersionJson) -> bool {
+    const NEEDLE: &str = "--launchTarget";
+    if let Some(args) = &v.arguments {
+        return args.game.iter().any(|item| match item {
+            ArgItem::Plain(s) => s == NEEDLE,
+            ArgItem::Conditional { value, .. } => value.items().iter().any(|s| s == NEEDLE),
+        });
+    }
+    v.minecraft_arguments
+        .as_deref()
+        .is_some_and(|s| s.split_whitespace().any(|a| a == NEEDLE))
+}
+
 /// 库去重的键：`group:artifact[:classifier[@ext]]`——**不含版本号**。
 ///
 /// 版本号不进键：父子给了同一个逻辑库的不同版本时，子版本赢（合并时子版本的库
@@ -794,6 +826,13 @@ mod tests {
         v(
             "fabric",
             include_str!("../tests/fixtures/fabric-1.21.4.json"),
+        )
+    }
+    /// 官方 NeoForge installer 写出的那份 version.json，原样收进来（未裁剪）。
+    fn neoforge() -> VersionJson {
+        v(
+            "neoforge",
+            include_str!("../tests/fixtures/neoforge-21.4.161.json"),
         )
     }
 
@@ -1252,6 +1291,92 @@ mod tests {
         // 段数不足的畸形坐标原样返回，不要 panic（数据来自服务端）
         assert_eq!(library_key("weird"), "weird");
         assert_eq!(library_key("a:b"), "a:b");
+    }
+
+    #[test]
+    fn loader_provides_game_jar_is_read_from_the_data_not_a_version_table() {
+        // NeoForge 的真实 version.json（官方 installer 写出的那份）
+        let merged_neoforge = merge(v1214(), neoforge());
+        assert!(
+            loader_provides_game_jar(&merged_neoforge),
+            "NeoForge 的游戏 jar 由 fml_loader 自己按坐标找，classpath 里不能放"
+        );
+        // 子版本单独看也成立（合并顺序不该影响这个判断）
+        assert!(loader_provides_game_jar(&neoforge()));
+
+        // 原版、Fabric 走 KnotClient / 原版 Main，必须有原版 jar 在 classpath 上
+        assert!(!loader_provides_game_jar(&v1214()));
+        assert!(!loader_provides_game_jar(&merge(v1214(), fabric())));
+        // Forge 1.12 及更早用 --tweakClass，同样要原版 jar
+        assert!(!loader_provides_game_jar(&v1122()));
+        assert!(!loader_provides_game_jar(&v1710()));
+    }
+
+    #[test]
+    fn neoforge_child_args_survive_the_merge() {
+        // --launchTarget 是 ModLauncher 的入口参数；少了它 fml_loader 拿到 null，
+        // 在 ImmediateWindowHandler.load 里 NPE（真跑出来的栈）
+        let merged = merge(v1214(), neoforge());
+        let v = vars();
+        let game = game_arguments(&merged, &win(), &no_features(), &v);
+        let i = game
+            .iter()
+            .position(|a| a == "--launchTarget")
+            .expect("--launchTarget 必须在游戏参数里");
+        assert_eq!(game[i + 1], "neoforgeclient");
+        for flag in [
+            "--fml.neoForgeVersion",
+            "--fml.fmlVersion",
+            "--fml.mcVersion",
+            "--fml.neoFormVersion",
+        ] {
+            assert!(game.iter().any(|a| a == flag), "{flag} 丢了：{game:?}");
+        }
+        // 子版本的参数排在父版本之前（既有约定），原版的 --username 等仍然在
+        let username = game
+            .iter()
+            .position(|a| a == "--username")
+            .expect("父版本的游戏参数不能丢");
+        assert!(
+            i < username,
+            "子先父后：--launchTarget 在 {i}，--username 在 {username}"
+        );
+
+        // JVM 参数：NeoForge 的模块路径那一套与父版本的 -cp / -Djava.library.path 都要在
+        let jvm = jvm_arguments(&merged, &win(), &no_features(), &v);
+        assert!(has(&jvm, "-p"), "模块路径参数丢了：{jvm:?}");
+        assert!(
+            has(&jvm, "--add-modules"),
+            "BootstrapLauncher 需要 --add-modules：{jvm:?}"
+        );
+        assert_eq!(jvm.iter().filter(|a| a.as_str() == "-cp").count(), 1);
+        assert!(
+            has(&jvm, "-Djava.library.path=/natives"),
+            "父版本的 natives 路径不能被子版本覆盖掉：{jvm:?}"
+        );
+    }
+
+    #[test]
+    fn neoforge_merge_dedupes_asm_and_keeps_the_child_version() {
+        // 原版带 asm 9.6、NeoForge 带 9.8 并把 9.8 放进模块路径（-p）。
+        // 两份同时在 classpath 上时 BootstrapLauncher 直接抛
+        // "Module named org.objectweb.asm was already on the JVMs module path ...
+        //  but class-path contains it at ...asm-9.6.jar"（真跑出来的报错）。
+        let merged = merge(v1214(), neoforge());
+        let asm: Vec<&str> = merged
+            .libraries
+            .iter()
+            .filter(|l| library_key(&l.name) == "org.ow2.asm:asm")
+            .map(|l| l.name.as_str())
+            .collect();
+        assert_eq!(asm.len(), 1, "{asm:?}");
+        assert!(asm[0].ends_with(":9.8"), "留下的必须是子版本的：{}", asm[0]);
+        // 子版本的库排在父版本之前
+        assert!(
+            merged.libraries[0].name.starts_with("net.neoforged"),
+            "{}",
+            merged.libraries[0].name
+        );
     }
 
     #[test]
