@@ -418,29 +418,50 @@ pub struct ResolvedLibrary {
     pub size: u64,
 }
 
-/// Maven 坐标 → 仓库相对路径。3 段 `g:a:v`，4 段 `g:a:v:classifier`。
+/// Maven 坐标 → 仓库相对路径。
+///
+/// 支持 Forge/NeoForge 用到的全部形态：`g:a:v`、`g:a:v:classifier`，以及扩展名覆盖
+/// `g:a:v@ext` 与 `g:a:v:classifier@ext`——NeoForge 的 `data` 里实测有
+/// `net.neoforged:neoform:1.21.4-20241203.161809@zip` 与 `…:mappings@txt`。
+/// 不认 `@ext` 的话它们会被拼成 `.jar`，processor 就找不到自己的输入文件，
+/// 而报错出现在 Java 那边，看不出是路径拼错了。
 pub fn maven_path(name: &str) -> Option<String> {
-    let p: Vec<&str> = name.split(':').collect();
-    match p.len() {
-        3 => Some(format!(
-            "{}/{}/{}/{}-{}.jar",
-            p[0].replace('.', "/"),
-            p[1],
-            p[2],
-            p[1],
-            p[2]
-        )),
-        4 => Some(format!(
-            "{}/{}/{}/{}-{}-{}.jar",
-            p[0].replace('.', "/"),
-            p[1],
-            p[2],
-            p[1],
-            p[2],
-            p[3]
-        )),
-        _ => None,
+    // `@ext` 挂在最后一段上，先摘出来。扩展名只认字母数字，
+    // 免得 `a:b:c:d@e@f` 这种畸形坐标拼出一个带 `@` 的路径。
+    let (coord, ext) = match name.split_once('@') {
+        Some((c, e))
+            if !c.is_empty() && !e.is_empty() && e.chars().all(|ch| ch.is_ascii_alphanumeric()) =>
+        {
+            (c, e)
+        }
+        Some((_, e)) if !e.is_empty() => return None,
+        _ => (name, "jar"),
+    };
+    let p: Vec<&str> = coord.split(':').collect();
+    if !matches!(p.len(), 3 | 4) {
+        return None;
     }
+    let (group, artifact, version) = (p[0], p[1], p[2]);
+    if group.is_empty() || artifact.is_empty() || version.is_empty() {
+        return None;
+    }
+    let classifier = if p.len() == 4 { p[3] } else { "" };
+    if !classifier.is_empty() && classifier.contains('@') {
+        return None;
+    }
+    let stem = if classifier.is_empty() {
+        format!("{artifact}-{version}")
+    } else {
+        format!("{artifact}-{version}-{classifier}")
+    };
+    Some(format!(
+        "{}/{}/{}/{}.{}",
+        group.replace('.', "/"),
+        artifact,
+        version,
+        stem,
+        ext
+    ))
 }
 
 fn join_url(base: &str, path: &str) -> String {
@@ -1553,6 +1574,46 @@ mod tests {
         );
         assert!(maven_path("nonsense").is_none());
         assert!(maven_path("a:b:c:d:e").is_none());
+
+        // `@ext` 是扩展名覆盖，Forge/NeoForge 的 install_profile 里真用得到
+        // （实测：`net.neoforged:neoform:1.21.4-20241203.161809@zip` 与 `…:mappings@txt`）。
+        // 拼错的话 processor 会在 Java 那边报"找不到文件"，根因看不出来。
+        assert_eq!(
+            maven_path("net.neoforged:neoform:1.21.4-20241203.161809@zip").unwrap(),
+            "net/neoforged/neoform/1.21.4-20241203.161809/neoform-1.21.4-20241203.161809.zip"
+        );
+        assert_eq!(
+            maven_path("net.neoforged:neoform:1.21.4-20241203.161809:mappings@txt").unwrap(),
+            "net/neoforged/neoform/1.21.4-20241203.161809/neoform-1.21.4-20241203.161809-mappings.txt"
+        );
+        // classifier 与 @ext 互不干扰：`:all` / `:fatjar` 仍然是 jar
+        assert_eq!(
+            maven_path("net.neoforged:AutoRenamingTool:2.0.3:all").unwrap(),
+            "net/neoforged/AutoRenamingTool/2.0.3/AutoRenamingTool-2.0.3-all.jar"
+        );
+        assert_eq!(
+            maven_path("net.neoforged.installertools:binarypatcher:2.1.2:fatjar").unwrap(),
+            "net/neoforged/installertools/binarypatcher/2.1.2/binarypatcher-2.1.2-fatjar.jar"
+        );
+        // 畸形坐标不 panic、不拼出畸形路径
+        for bad in [
+            "",
+            ":",
+            "a::c",
+            "a:b:c:",
+            "a:b:c:@",
+            "a:b:c:d@e@f",
+            "a:b:c@/etc",
+        ] {
+            if let Some(path) = maven_path(bad) {
+                assert!(
+                    !path.contains("//") && !path.contains('@'),
+                    "{bad:?} → {path:?}"
+                );
+            }
+        }
+        assert!(maven_path("a:b:c:d@e@f").is_none(), "扩展名里不该再有 @");
+        assert!(maven_path("a:b:c@/etc").is_none(), "扩展名里不该有分隔符");
     }
 
     #[test]

@@ -110,11 +110,25 @@ jobs:
         with:
           workspaces: src-tauri
 
+      # NeoForge 的 processor pipeline 要用 Java 跑（installertools / jarsplitter /
+      # AutoRenamingTool / binarypatcher），1.21.4 这一代要 Java 21。
+      # 固定装上，不依赖 runner 预装的是哪个版本。
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
       - name: install a real version and check the launch plan
         working-directory: src-tauri
         # COMPASS_SMOKE_LAUNCH 不设：runner 没有显示环境，只验"装得对 + 命令行自洽"。
         # 真的拉起游戏由人工验收清单覆盖（计划文档 P1 验收）。
         run: cargo test --release --test install_smoke -- --ignored --nocapture
+
+      - name: install a real NeoForge version (processor pipeline)
+        working-directory: src-tauri
+        # 这一步要跑 6 个 Java 子进程（切分/改名/打补丁），对路径分隔符与 java
+        # 可执行文件名敏感，所以必须三平台都跑：只在 Windows 上验过不算验过。
+        run: cargo test --release --test neoforge_live -- --ignored --nocapture
 
   package:
     name: package (${{ matrix.platform }})

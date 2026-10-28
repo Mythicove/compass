@@ -75,6 +75,16 @@ impl Installer {
         Self { meta, dl, paths }
     }
 
+    /// Forge/NeoForge 的 processor pipeline 要用到同一份下载器与路径布局
+    /// （`{ROOT}`/`{LIBRARY_DIR}` 必须与安装产物落点一致），所以借出去而不是各造一份。
+    pub fn downloader(&self) -> &Downloader {
+        &self.dl
+    }
+
+    pub fn paths(&self) -> &Paths {
+        &self.paths
+    }
+
     /// 生成下载计划（纯函数，不碰网络）。
     ///
     /// 库解析必须与启动时用**同一套** OsInfo/Features，否则会出现"装了但 classpath 里没有"

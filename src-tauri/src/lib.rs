@@ -13,6 +13,7 @@ pub mod commands;
 pub mod config;
 pub mod content;
 pub mod error;
+pub mod forge;
 pub mod install;
 pub mod instance;
 pub mod java;

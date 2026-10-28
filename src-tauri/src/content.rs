@@ -476,13 +476,10 @@ fn read_entry<R: Read + std::io::Seek>(
 }
 
 /// `MANIFEST.MF` 的 `Implementation-Version`：Forge 的 `${file.jarVersion}` 在构建时被替换成它，
-/// 所以这是"版本号显示为占位符"时的正确兜底。
+/// 所以这是"版本号显示为占位符"时的正确兜底。解析规则复用 `archive`（含 72 字节折行的拼接）。
 fn manifest_version<R: Read + std::io::Seek>(archive: &mut zip::ZipArchive<R>) -> Option<String> {
     let text = read_entry(archive, "META-INF/MANIFEST.MF")?;
-    text.lines()
-        .find_map(|line| line.strip_prefix("Implementation-Version:"))
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
+    crate::archive::manifest_attr_from_text(&text, "Implementation-Version")
 }
 
 // ---------------------------------------------------------------------------

@@ -167,6 +167,17 @@ impl ApiClient {
         let res = self.http.get(url).send().await?;
         self.json_or_error(res).await
     }
+
+    /// GET 一个纯文本端点（Maven 的 `maven-metadata.xml` 与 `.sha1` 都是文本）。
+    pub async fn get_text(&self, url: &str) -> Result<String, Error> {
+        let res = self.http.get(url).send().await?;
+        let status = res.status().as_u16();
+        let text = res.text().await?;
+        if !(200..300).contains(&status) {
+            return Err(api_error(status, &text));
+        }
+        Ok(text)
+    }
 }
 
 /// 把动态值按 URL 路径段百分号编码后拼进地址。name/project_id 来自 UI 与后端数据，

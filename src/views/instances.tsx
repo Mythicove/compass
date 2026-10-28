@@ -5,6 +5,7 @@ import { errorKey, useI18n } from "../i18n";
 import {
   EVENTS,
   LOADER_KINDS,
+  LOADER_LABELS,
   ipc,
   toIpcError,
   type ArchiveInfo,
@@ -633,7 +634,7 @@ export function InstancesView({ onOpenContent }: { onOpenContent: (slug: string)
                   setNotice(
                     updated.loader
                       ? t("instances.loaderInstalled", {
-                          kind: updated.loader.kind,
+                          kind: LOADER_LABELS[updated.loader.kind],
                           version: updated.loader.version,
                         })
                       : t("instances.loaderRemoved"),
@@ -735,7 +736,7 @@ function LoaderPanel({ inst, busy, run, onError, onDone }: LoaderPanelProps) {
       {inst.loader ? (
         <p className="small">
           {t("instances.loaderCurrent", {
-            kind: inst.loader.kind,
+            kind: LOADER_LABELS[inst.loader.kind],
             version: inst.loader.version,
             game: inst.loader.gameVersion,
           })}
@@ -751,7 +752,7 @@ function LoaderPanel({ inst, busy, run, onError, onDone }: LoaderPanelProps) {
             className={k === kind ? "tab active" : "tab"}
             onClick={() => setKind(k)}
           >
-            {k === "fabric" ? "Fabric" : "Quilt"}
+            {LOADER_LABELS[k]}
           </button>
         ))}
       </div>

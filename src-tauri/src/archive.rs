@@ -173,6 +173,37 @@ pub fn entries_summary(archive: &Path) -> Result<(usize, u64), Error> {
     Ok((files, bytes))
 }
 
+/// 读 jar 的 `META-INF/MANIFEST.MF` 里某个属性。
+pub fn manifest_attr(jar: &Path, key: &str) -> Result<Option<String>, Error> {
+    let Some(text) = read_text_entry(jar, "META-INF/MANIFEST.MF")? else {
+        return Ok(None);
+    };
+    Ok(manifest_attr_from_text(&text, key))
+}
+
+/// MANIFEST 文本里取某个属性（解析规则只有一份，`manifest_attr` 与 mod 元数据都用它）。
+///
+/// MANIFEST 有折行规则：每行最多 72 字节，续行以**一个空格**开头。不拼回去的话长值会被截断
+/// ——`Main-Class` 通常短，但 `Implementation-Version` 与 Forge 的各种长属性会踩到。
+pub fn manifest_attr_from_text(text: &str, key: &str) -> Option<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for raw in text.lines() {
+        if let Some(rest) = raw.strip_prefix(' ')
+            && let Some(last) = lines.last_mut()
+        {
+            last.push_str(rest);
+            continue;
+        }
+        lines.push(raw.to_string());
+    }
+    let prefix = format!("{key}:");
+    lines.iter().find_map(|l| {
+        l.strip_prefix(prefix.as_str())
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    })
+}
+
 /// 只读压缩包里的一个文本条目，**不解压整个包**。
 ///
 /// 导入前先看一眼里面是什么（`instance.json`）靠它：让用户在东西落盘之前
