@@ -17,6 +17,7 @@ pub mod install;
 pub mod instance;
 pub mod java;
 pub mod launch;
+pub mod loader;
 pub mod meta;
 pub mod net;
 pub mod paths;
@@ -94,6 +95,9 @@ pub fn run() {
             commands::content_set_enabled,
             commands::content_import,
             commands::content_remove,
+            commands::loader_versions,
+            commands::loader_install,
+            commands::loader_remove,
             commands::instance_launch,
             commands::instance_stop,
             commands::game_running

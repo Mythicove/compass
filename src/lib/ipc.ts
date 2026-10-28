@@ -130,6 +130,8 @@ export interface Instance {
   resolution: Resolution | null;
   server: ServerJoin | null;
   demo: boolean;
+  /** null = 原版。装载 loader 时写入，不是从 versionId 反推的（见 Rust 侧 InstanceLoader） */
+  loader: InstanceLoader | null;
 }
 
 export interface Resolution {
@@ -205,6 +207,25 @@ export interface JavaRuntime {
   path: string;
   version: number;
   is64bit: boolean;
+}
+
+/** Mod loader 类型（P3 后半段的 Forge/NeoForge 落地时再扩）。 */
+export type LoaderKind = "fabric" | "quilt";
+
+export const LOADER_KINDS: LoaderKind[] = ["fabric", "quilt"];
+
+/** 一个可用的 loader 版本。`stable` 为 null 表示**来源没说**
+ *  （Quilt 的 meta 没有这个字段）——不要把它显示成"开发版"。 */
+export interface LoaderVersion {
+  version: string;
+  stable: boolean | null;
+}
+
+/** 实例上记录的 loader。装载时写入，不是从版本 id 反推的。 */
+export interface InstanceLoader {
+  kind: LoaderKind;
+  version: string;
+  gameVersion: string;
 }
 
 /** 导出结果（对应 Rust 的 `archive::ZipSummary`）。 */
@@ -359,6 +380,16 @@ export const ipc = {
     invoke<string[]>("content_import", { slug, kind, sources }),
   contentRemove: (slug: string, kind: ContentKind, fileName: string) =>
     invoke<void>("content_remove", { slug, kind, fileName }),
+
+  // ---- Mod loader ----
+  /** 某个游戏版本可用的 loader 版本（stable 为 null = 来源没说，别当成 dev） */
+  loaderVersions: (kind: LoaderKind, gameVersion: string) =>
+    invoke<LoaderVersion[]>("loader_versions", { kind, gameVersion }),
+  /** 装 loader 并把实例指到新的版本 id；下载进度走 EVENTS.progress */
+  loaderInstall: (slug: string, kind: LoaderKind, loaderVersion: string) =>
+    invoke<Instance>("loader_install", { slug, kind, loaderVersion }),
+  /** 回到原版；原版没装好时会报错而不是把实例指向一个不存在的版本 */
+  loaderRemove: (slug: string) => invoke<Instance>("loader_remove", { slug }),
 
   // ---- 启动 ----
   instanceLaunch: (slug: string) => invoke<LaunchInfo>("instance_launch", { slug }),

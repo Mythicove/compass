@@ -4,6 +4,7 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import { errorKey, useI18n } from "../i18n";
 import {
   EVENTS,
+  LOADER_KINDS,
   ipc,
   toIpcError,
   type ArchiveInfo,
@@ -13,6 +14,8 @@ import {
   type Instance,
   type InstanceSettings,
   type JavaRuntime,
+  type LoaderKind,
+  type LoaderVersion,
   type ManifestEntry,
 } from "../lib/ipc";
 
@@ -77,6 +80,8 @@ export function InstancesView({ onOpenContent }: { onOpenContent: (slug: string)
   // 设置面板（一次只开一个：同时编辑两个实例的设置，保存时必然有一个是被旧值覆盖的）
   const [editing, setEditing] = useState<string | null>(null);
   const [form, setForm] = useState<InstanceSettings | null>(null);
+  // loader 面板
+  const [loaderOf, setLoaderOf] = useState<string | null>(null);
   // 复制进度（几个 GB 的实例要复制一会儿，没有反馈时看起来像卡死）
   const [copying, setCopying] = useState<CopyProgress | null>(null);
   const [dupOf, setDupOf] = useState<string | null>(null);
@@ -157,6 +162,15 @@ export function InstancesView({ onOpenContent }: { onOpenContent: (slug: string)
       await reload();
     }
   };
+
+  /** 给子组件用的错误上报（与 act 里那条同一套文案规则，别各写一份）。 */
+  const fail = useCallback(
+    (e: unknown) => {
+      const err = toIpcError(e);
+      setError(`${t(errorKey(err.code))} — ${err.message}`);
+    },
+    [t],
+  );
 
   const create = () =>
     act("create", async () => {
@@ -327,7 +341,7 @@ export function InstancesView({ onOpenContent }: { onOpenContent: (slug: string)
         {notice && <p className="ok small">{notice}</p>}
         {busy && (
           <p className="muted small" role="status">
-            {busy.endsWith(":install")
+            {busy.endsWith(":install") || busy.endsWith(":loader")
               ? t("instances.downloading", {
                   files: done.files.size,
                   mb: mbOf(done.bytes),
@@ -524,6 +538,14 @@ export function InstancesView({ onOpenContent }: { onOpenContent: (slug: string)
                   type="button"
                   className="link"
                   disabled={busy !== null || isRunning}
+                  onClick={() => setLoaderOf(loaderOf === inst.slug ? null : inst.slug)}
+                >
+                  {t("instances.loader")}
+                </button>
+                <button
+                  type="button"
+                  className="link"
+                  disabled={busy !== null || isRunning}
                   onClick={() => {
                     setDupOf(isDuplicating ? null : inst.slug);
                     setDupName(isDuplicating ? "" : `${inst.name} copy`);
@@ -600,6 +622,27 @@ export function InstancesView({ onOpenContent }: { onOpenContent: (slug: string)
               </div>
             )}
 
+            {loaderOf === inst.slug && (
+              <LoaderPanel
+                inst={inst}
+                busy={busy}
+                run={act}
+                onError={fail}
+                onDone={(updated) => {
+                  setLoaderOf(null);
+                  setNotice(
+                    updated.loader
+                      ? t("instances.loaderInstalled", {
+                          kind: updated.loader.kind,
+                          version: updated.loader.version,
+                        })
+                      : t("instances.loaderRemoved"),
+                  );
+                  void reload();
+                }}
+              />
+            )}
+
             {isEditing && form && (
               <SettingsPanel
                 form={form}
@@ -619,6 +662,135 @@ export function InstancesView({ onOpenContent }: { onOpenContent: (slug: string)
           </section>
         );
       })}
+    </div>
+  );
+}
+
+interface LoaderPanelProps {
+  inst: Instance;
+  busy: string | null;
+  /** 父组件的 act：所有会改状态的操作都要走它，否则 busy/进度/禁用态全部失效 */
+  run: (key: string, fn: () => Promise<void>) => Promise<void>;
+  onError: (e: unknown) => void;
+  onDone: (updated: Instance) => void;
+}
+
+/**
+ * Mod loader 面板。
+ *
+ * 游戏版本不让用户填：它来自实例（已装过 loader 的用记录的 gameVersion，否则 versionId
+ * 本身就是游戏版本）。让用户填的话，给 1.21.4 的实例装上 1.20.1 的 loader 要等到
+ * 启动时才炸。
+ */
+function LoaderPanel({ inst, busy, run, onError, onDone }: LoaderPanelProps) {
+  const { t } = useI18n();
+  const [kind, setKind] = useState<LoaderKind>(inst.loader?.kind ?? "fabric");
+  const [versions, setVersions] = useState<LoaderVersion[] | null>(null);
+  const [picked, setPicked] = useState(inst.loader?.version ?? "");
+  const gameVersion = inst.loader?.gameVersion ?? inst.versionId;
+  const installing = busy === `${inst.slug}:loader`;
+  const removing = busy === `${inst.slug}:loaderRemove`;
+
+  useEffect(() => {
+    let cancelled = false;
+    setVersions(null);
+    ipc
+      .loaderVersions(kind, gameVersion)
+      .then((list) => {
+        if (cancelled) return;
+        setVersions(list);
+        // 默认选中：当前已装的 → 第一个 stable → 第一个
+        setPicked((cur) => {
+          if (cur && list.some((v) => v.version === cur)) return cur;
+          return (
+            list.find((v) => v.stable === true)?.version ??
+            list.find((v) => v.stable === null)?.version ??
+            list[0]?.version ??
+            ""
+          );
+        });
+      })
+      .catch((e) => {
+        if (!cancelled) onError(e);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [kind, gameVersion, onError]);
+
+  const install = () =>
+    run(`${inst.slug}:loader`, async () => {
+      if (!picked) return;
+      onDone(await ipc.loaderInstall(inst.slug, kind, picked));
+    });
+
+  const remove = () =>
+    run(`${inst.slug}:loaderRemove`, async () => {
+      onDone(await ipc.loaderRemove(inst.slug));
+    });
+
+  return (
+    <div className="stack sub">
+      <h3>{t("instances.loaderTitle")}</h3>
+      {inst.loader ? (
+        <p className="small">
+          {t("instances.loaderCurrent", {
+            kind: inst.loader.kind,
+            version: inst.loader.version,
+            game: inst.loader.gameVersion,
+          })}
+        </p>
+      ) : (
+        <p className="muted small">{t("instances.loaderNone")}</p>
+      )}
+      <div className="row">
+        {LOADER_KINDS.map((k) => (
+          <button
+            key={k}
+            type="button"
+            className={k === kind ? "tab active" : "tab"}
+            onClick={() => setKind(k)}
+          >
+            {k === "fabric" ? "Fabric" : "Quilt"}
+          </button>
+        ))}
+      </div>
+      <label className="field">
+        <span>{t("instances.loaderVersion")}</span>
+        <select
+          value={picked}
+          disabled={versions === null}
+          onChange={(e) => setPicked(e.target.value)}
+        >
+          {versions === null && <option value="">{t("instances.loaderLoading")}</option>}
+          {versions?.length === 0 && <option value="">{t("instances.loaderNoVersions", { game: gameVersion })}</option>}
+          {versions?.map((v) => (
+            <option key={v.version} value={v.version}>
+              {v.version}
+              {v.stable === true ? ` · ${t("instances.loaderStable")}` : ""}
+              {v.stable === false ? ` · ${t("instances.loaderDev")}` : ""}
+            </option>
+          ))}
+        </select>
+      </label>
+      <p className="muted small">
+        {t("instances.loaderHint", { game: gameVersion, id: inst.versionId })}
+      </p>
+      <div className="row">
+        <button type="button" disabled={busy !== null || !picked} onClick={() => void install()}>
+          {installing ? "…" : inst.loader ? t("instances.loaderChange") : t("instances.loaderInstall")}
+        </button>
+        {inst.loader && (
+          <button
+            type="button"
+            className="link"
+            disabled={busy !== null}
+            onClick={() => void remove()}
+          >
+            {removing ? "…" : t("instances.loaderRemove")}
+          </button>
+        )}
+      </div>
     </div>
   );
 }

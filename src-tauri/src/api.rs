@@ -160,11 +160,18 @@ impl ApiClient {
         }
         serde_json::from_str(&text).map_err(|e| Error::Config(format!("decode response: {e}")))
     }
+
+    /// GET 一个 JSON 端点。状态码处理与解码只在这一处，
+    /// 免得每个新数据源（loader meta、整合包源）各写一遍而漏掉非 2xx。
+    pub async fn get_json<T: for<'de> Deserialize<'de>>(&self, url: &str) -> Result<T, Error> {
+        let res = self.http.get(url).send().await?;
+        self.json_or_error(res).await
+    }
 }
 
 /// 把动态值按 URL 路径段百分号编码后拼进地址。name/project_id 来自 UI 与后端数据，
 /// 直接内插等于让它们改写请求目标（`../`、`?`、`#`、`/` 都有 URL 语义）。
-fn join_path(base: &str, segments: &[&str]) -> Result<String, Error> {
+pub(crate) fn join_path(base: &str, segments: &[&str]) -> Result<String, Error> {
     let mut url = url::Url::parse(base).map_err(|e| Error::Url(format!("{base:?}: {e}")))?;
     {
         let mut paths = url

@@ -17,6 +17,31 @@ use crate::net::{Downloader, FileTask, ProgressSink, Summary, format_failures};
 use crate::paths::{Paths, safe_join};
 use crate::version::{self, Features, LibraryKind, OsInfo, VersionJson};
 
+/// 版本 id 的规则：它会被当成**目录名**用在 `versions/<id>/` 下，所以必须是单个安全的路径分量。
+///
+/// id 有两个来源都不可信：官方清单，以及 loader 的 profile（Fabric/Quilt 的 meta 服务）。
+/// 一个返回 `"id": "../../evil"` 的 meta 服务就是一次任意路径写入，所以装之前先校验。
+/// 与 `instance::validate_slug` 的区别是**允许 `.`**（版本号必须有点），因此 `..` 要单独挡；
+/// 字符集也放宽到 `+`（Quilt 的 `0.20.0-beta.9`、Fabric 的 `0.15.4+mixin.0.8.7` 都要能过）。
+pub fn validate_version_id(id: &str) -> Result<(), Error> {
+    let ok = !id.is_empty()
+        && id.len() <= 128
+        && id != "."
+        && id != ".."
+        && !id.contains("..")
+        && !id.contains('/')
+        && !id.contains('\\')
+        && !id.chars().any(|c| c.is_control())
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '+'));
+    if ok {
+        Ok(())
+    } else {
+        Err(Error::Invalid(format!("invalid version id: {id:?}")))
+    }
+}
+
 /// 安装结果：启动所需的一切（合并后的版本 JSON 是启动参数的唯一来源）。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -113,14 +138,42 @@ impl Installer {
         id: &str,
         progress: Option<ProgressSink>,
     ) -> Result<InstalledVersion, Error> {
-        let os = OsInfo::current();
+        validate_version_id(id)?;
         let manifest = self.meta.manifest().await?;
         let entry = manifest
             .by_id(id)
             .ok_or_else(|| Error::Invalid(format!("unknown version: {id}")))?
             .clone();
         let merged = self.meta.resolve_version(&entry).await?;
+        self.install_merged(id, merged, progress).await
+    }
 
+    /// 安装一个**已经拿到 profile** 的继承型版本（Fabric/Quilt 的 loader profile）。
+    ///
+    /// 与 `install` 的区别只在于子版本 JSON 从哪来：官方版本从清单取（有 sha1 可核对），
+    /// loader profile 直接从 meta 服务取（清单里没有它，也就没有 sha1）。
+    /// profile 的 `id` 是服务端给的，而它会被当成目录名，所以先过 `validate_version_id`。
+    /// 父版本仍然走清单（`inheritsFrom` 指向的游戏版本），因此信任根没变。
+    pub async fn install_profile(
+        &self,
+        child: VersionJson,
+        progress: Option<ProgressSink>,
+    ) -> Result<InstalledVersion, Error> {
+        let id = child.id.clone();
+        validate_version_id(&id)?;
+        let merged = self.meta.resolve_from(child).await?;
+        self.install_merged(&id, merged, progress).await
+    }
+
+    /// 合并后的版本 JSON → 落盘 + 下载。`install` 与 `install_profile` 共用这一份，
+    /// 免得两条安装路径在"装完到底写了什么"上分岔。
+    async fn install_merged(
+        &self,
+        id: &str,
+        merged: VersionJson,
+        progress: Option<ProgressSink>,
+    ) -> Result<InstalledVersion, Error> {
+        let os = OsInfo::current();
         let plan = self.plan(id, &merged, &os)?;
         std::fs::create_dir_all(self.version_dir(id))?;
         // 合并后的版本 JSON 落盘：启动时不再联网取元数据（离线也能启动已装好的版本）

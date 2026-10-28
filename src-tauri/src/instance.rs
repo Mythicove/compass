@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::archive::{SKIP_DIRS, skip_file};
 use crate::error::Error;
 use crate::launch::ServerJoin;
+use crate::loader::LoaderKind;
 use crate::paths::Paths;
 
 /// 窗口分辨率下限/上限。低于这个尺寸游戏窗口画不出东西，高于它多半是输入错误。
@@ -25,6 +26,20 @@ pub const MAX_MEMORY_MB: u32 = 131_072;
 pub struct Resolution {
     pub width: u32,
     pub height: u32,
+}
+
+/// 这个实例装了什么 loader。
+///
+/// **装载时记录，而不是事后从版本 id 里反推**：Fabric 的 id 是
+/// `fabric-loader-0.16.9-1.21.4`，Quilt 的是 `quilt-loader-0.20.0-beta.9-1.21.4`——
+/// loader 版本自己就带 `-`，而预发布的游戏版本也带（`1.21.4-rc1`），
+/// 按分隔符切一定会有切错的时候。装的那一刻我们本来就知道这三件事，记下来就行。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstanceLoader {
+    pub kind: LoaderKind,
+    pub version: String,
+    pub game_version: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -54,6 +69,8 @@ pub struct Instance {
     pub server: Option<ServerJoin>,
     /// 演示模式（不登录正版也能玩，但存档受时间限制）。
     pub demo: bool,
+    /// 装了哪个 loader（None = 原版）。见 `InstanceLoader`：装载时记录，不从 id 反推。
+    pub loader: Option<InstanceLoader>,
 }
 
 /// 用户在设置面板里能改的字段。
@@ -245,6 +262,13 @@ fn clean_args(args: Vec<String>) -> Result<Vec<String>, Error> {
 /// 把设置写进实例。**不碰** slug / created_at / launches / last_launched_at：
 /// 这些由启动路径维护，让 UI 一起回传会互相覆盖。
 pub fn apply_settings(inst: &mut Instance, s: InstanceSettings) {
+    // version_id 与 loader 必须一致，而设置面板改 version_id 时我们并不知道
+    // 新值对应哪个 loader（可能是原版，也可能是另一个 loader 版本）。
+    // 清空比留一条可能是错的记录好：显示成"Fabric"而实际是原版，
+    // 用户接下来会去 mods 目录里找不生效的原因。loader 由装载流程重新写入。
+    if s.version_id != inst.version_id {
+        inst.loader = None;
+    }
     inst.name = s.name;
     inst.version_id = s.version_id;
     inst.memory_mb = s.memory_mb;

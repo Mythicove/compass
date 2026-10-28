@@ -16,6 +16,7 @@ use std::path::PathBuf;
 use compass_lib::assets::{self, AssetIndex};
 use compass_lib::install::{Installer, split_libraries};
 use compass_lib::launch::{self, LaunchOptions};
+use compass_lib::loader::LoaderKind;
 use compass_lib::meta::MetaClient;
 use compass_lib::net::Downloader;
 use compass_lib::paths::Paths;
@@ -233,7 +234,194 @@ async fn installs_a_real_version_and_produces_a_consistent_launch_plan() {
     // 启动的是导入出来的实例（见上面的注释：那才是验收项）
     let inst = imported;
 
-    // 7. 可选：真的把游戏拉起来，启动的是**导入出来的**实例（验收项：导出再导入可正常启动）。
+    // 7. Fabric：真装一个 loader 版本，验"继承型版本"这条链路端到端可用。
+    //    这一段不启动游戏，所以 CI 三平台每次都会跑到（启动在第 8 步，需要显示环境）。
+    let api = compass_lib::api::ApiClient::new(http.clone());
+    let fabric_versions = compass_lib::loader::versions(&api, LoaderKind::Fabric, VERSION)
+        .await
+        .unwrap();
+    assert!(
+        !fabric_versions.is_empty(),
+        "Fabric meta 对 {VERSION} 没给出任何 loader 版本"
+    );
+    // stable 优先（Fabric 的 loader 对象有这个字段），没有就退回第一个
+    let chosen = fabric_versions
+        .iter()
+        .find(|v| v.stable == Some(true))
+        .unwrap_or(&fabric_versions[0]);
+    println!(
+        "fabric loader versions: {} (chosen {} stable={:?})",
+        fabric_versions.len(),
+        chosen.version,
+        chosen.stable
+    );
+    let fabric = compass_lib::loader::install(
+        &installer,
+        &api,
+        LoaderKind::Fabric,
+        VERSION,
+        &chosen.version,
+        None,
+    )
+    .await
+    .unwrap();
+    println!(
+        "fabric installed: id={} jar={} main={} libs downloaded={} skipped={}",
+        fabric.id,
+        fabric.jar_version,
+        fabric.main_class,
+        fabric.download.downloaded,
+        fabric.download.skipped
+    );
+    assert!(
+        fabric.id.starts_with("fabric-loader-"),
+        "profile 的 id 应当是 loader 生成的形状：{}",
+        fabric.id
+    );
+    assert_eq!(
+        fabric.jar_version, VERSION,
+        "client jar 来自父版本（继承型版本自己不带 jar）"
+    );
+    assert!(
+        fabric.main_class.contains("fabricmc"),
+        "合并后主类应当是 Fabric 的 Knot：{}",
+        fabric.main_class
+    );
+    // 合并后的版本 JSON 落盘 = 可离线启动
+    let fabric_json = compass_lib::runner::installed_version_path(&paths, &fabric.id);
+    assert!(fabric_json.is_file(), "{} 没落盘", fabric_json.display());
+    let merged_fabric = compass_lib::runner::read_installed_version(&paths, &fabric.id).unwrap();
+    // 落盘的合并结果**仍然**带着 inheritsFrom：`jar_version()` 靠它定位 client jar
+    // （继承型版本自己不带 jar，jar 在父版本目录下）。清掉它，启动就会报 client jar missing。
+    assert_eq!(
+        merged_fabric.inherits_from.as_deref(),
+        Some(VERSION),
+        "合并结果应当仍指向提供 jar 的父版本"
+    );
+    assert_eq!(merged_fabric.jar_version(), VERSION);
+
+    // 启动计划：这一步验的正是 P1 那条教训——子版本的 arguments.jvm 只有一条
+    // `-DFabricMcEmu=…`，按"子覆盖父"合并会让命令行里既没有 -Djava.library.path 也没有 -cp。
+    let fabric_inst = compass_lib::instance::Instance {
+        slug: "smoke-fabric".into(),
+        name: "Smoke Fabric".into(),
+        version_id: fabric.id.clone(),
+        memory_mb: Some(2048),
+        ..compass_lib::instance::Instance::default()
+    };
+    compass_lib::instance::save(&paths, &fabric_inst).unwrap();
+    let fake_account = compass_lib::account::Account {
+        player_name: "SmokeTester".into(),
+        player_uuid: "069a79f444e94726a5befca90e38aaf5".into(),
+        access_token: "0".repeat(32),
+        client_token: "0".repeat(32),
+        api_url: "https://mc.example.com".into(),
+        signed_in_at: 0,
+    };
+    let plan = compass_lib::runner::build(&compass_lib::runner::LaunchInput {
+        instance: &fabric_inst,
+        account: &fake_account,
+        version: &merged_fabric,
+        os: &OsInfo::current(),
+        paths: &paths,
+        default_memory_mb: 2048,
+        api_url: "https://mc.example.com",
+        java: java_path(),
+        authlib_jar: None,
+        prefetched_meta: None,
+    })
+    .unwrap();
+    assert!(
+        plan.args.iter().any(|a| a.contains("KnotClient")),
+        "主类应当是 Fabric 的 KnotClient：{:?}",
+        plan.args
+    );
+    assert!(
+        plan.args.iter().any(|a| a.starts_with("-DFabricMcEmu=")),
+        "子版本的 JVM 参数丢了：{:?}",
+        plan.args
+    );
+    assert!(
+        plan.args
+            .iter()
+            .any(|a| a.starts_with("-Djava.library.path=")),
+        "父版本的 JVM 参数被子版本覆盖了（P1 修过的正是这个）：{:?}",
+        plan.args
+    );
+    let cp_idx = plan
+        .args
+        .iter()
+        .position(|a| a == "-cp")
+        .expect("合并后必须有 -cp");
+    let cp = &plan.args[cp_idx + 1];
+    assert!(
+        cp.contains("fabric-loader"),
+        "classpath 里应当有 fabric-loader：{cp}"
+    );
+    assert!(
+        cp.contains("intermediary"),
+        "classpath 里应当有 intermediary：{cp}"
+    );
+    // classpath 上每一项都得真在磁盘上（下载少一个 jar，JVM 抛的是 ClassNotFoundException）
+    let sep = if cfg!(windows) { ';' } else { ':' };
+    for entry in cp.split(sep) {
+        assert!(
+            PathBuf::from(entry).is_file(),
+            "classpath entry missing: {entry}"
+        );
+    }
+    assert!(
+        !plan.args.iter().any(|a| a.contains("${")),
+        "unsubstituted placeholder: {:?}",
+        plan.args
+    );
+
+    // 8. Quilt：同一个实现、另一个 meta 服务。这里只验端点与 profile 形状，
+    //    不重复一遍完整安装（下载与合并的代码路径与 Fabric 完全相同）。
+    let quilt_versions = compass_lib::loader::versions(&api, LoaderKind::Quilt, VERSION)
+        .await
+        .unwrap();
+    assert!(
+        !quilt_versions.is_empty(),
+        "Quilt meta 对 {VERSION} 没给出任何 loader 版本"
+    );
+    // Quilt 的 loader 对象**没有** stable 字段：必须是 None，不能是 false
+    // （否则 UI 会把 Quilt 的每个版本都标成"开发版"，那是替它编了一句它没说过的话）
+    assert!(
+        quilt_versions.iter().all(|v| v.stable.is_none()),
+        "Quilt 的 stable 应当全是 None：{:?}",
+        quilt_versions.iter().take(3).collect::<Vec<_>>()
+    );
+    let quilt_profile =
+        compass_lib::loader::profile(&api, LoaderKind::Quilt, VERSION, &quilt_versions[0].version)
+            .await
+            .unwrap();
+    assert_eq!(
+        quilt_profile.inherits_from.as_deref(),
+        Some(VERSION),
+        "Quilt profile 的父版本应当是游戏版本"
+    );
+    assert!(
+        quilt_profile.id.starts_with("quilt-loader-"),
+        "{}",
+        quilt_profile.id
+    );
+    assert!(
+        quilt_profile
+            .main_class
+            .as_deref()
+            .is_some_and(|m| m.contains("quiltmc")),
+        "主类应当是 Quilt 的 Knot：{:?}",
+        quilt_profile.main_class
+    );
+    println!(
+        "quilt ok: {} loader versions, profile {} (libs {})",
+        quilt_versions.len(),
+        quilt_profile.id,
+        quilt_profile.libraries.len()
+    );
+
+    // 9. 可选：真的把游戏拉起来，启动的是**导入出来的**实例（验收项：导出再导入可正常启动）。
     //    走 runner::prepare_launch——与 instance_launch 命令是同一条代码路径，
     //    所以这里验的就是用户会跑到的东西（而不是测试自己重写一遍顺序）。
     if std::env::var("COMPASS_SMOKE_LAUNCH").is_err() {

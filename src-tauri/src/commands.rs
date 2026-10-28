@@ -17,9 +17,10 @@ use crate::config::{self, Config};
 use crate::content::{self, ContentItem, ContentStats, Kind};
 use crate::error::Error;
 use crate::install::{InstalledVersion, Installer};
-use crate::instance::{self, ArchiveInfo, Instance, InstanceSettings};
+use crate::instance::{self, ArchiveInfo, Instance, InstanceLoader, InstanceSettings};
 use crate::java::{self, JavaRuntime};
 use crate::launch;
+use crate::loader::{self, LoaderKind, LoaderVersion};
 use crate::meta::{ManifestEntry, MetaClient};
 use crate::net::{self, Downloader};
 use crate::paths::PathsInfo;
@@ -510,6 +511,111 @@ pub async fn instance_java(
     let version = runner::read_installed_version(&state.paths, &inst.version_id)?;
     let (major, exact) = runner::java_requirement(&version);
     Ok(java::find(major, exact, Some(&state.paths.java())).await)
+}
+
+// ---------------------------------------------------------------------------
+// Mod loader（P3：Fabric / Quilt）
+// ---------------------------------------------------------------------------
+
+/// 某个游戏版本可用的 loader 版本。
+#[tauri::command]
+pub async fn loader_versions(
+    state: State<'_, Arc<AppState>>,
+    kind: LoaderKind,
+    game_version: String,
+) -> Result<Vec<LoaderVersion>, Error> {
+    let api = state.api.clone();
+    loader::versions(&api, kind, &game_version).await
+}
+
+/// 给实例装 loader：取 profile → 与父版本合并 → 下载库，然后把实例指到新版本 id。
+///
+/// 游戏版本从实例上取（已装过 loader 的实例用它记录的 `game_version`，
+/// 否则 `version_id` 本身就是游戏版本），**不让前端传**：前端传错就会
+/// 给 1.21.4 的实例装上 1.20.1 的 loader，而失败要等到启动时才出现。
+#[tauri::command]
+pub async fn loader_install(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    slug: String,
+    kind: LoaderKind,
+    loader_version: String,
+) -> Result<Instance, Error> {
+    require_stopped(&state, &slug).await?;
+    let cfg = state.config.read().await.clone();
+    let mut inst = instance::load(&state.paths, &slug)?;
+    let game_version = inst
+        .loader
+        .as_ref()
+        .map(|l| l.game_version.clone())
+        .unwrap_or_else(|| inst.version_id.clone());
+
+    let meta = MetaClient::new(state.http.clone(), cfg.download.mirror.clone());
+    let dl = Downloader::new(
+        state.http.clone(),
+        cfg.download.concurrency,
+        cfg.download.mirror.clone(),
+    );
+    let installer = Installer::new(meta, dl, state.paths.clone());
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let emitter = app.clone();
+    let forwarder = tokio::spawn(async move {
+        while let Some(p) = rx.recv().await {
+            let _ = emitter.emit(PROGRESS_EVENT, p);
+        }
+    });
+    let installed = loader::install(
+        &installer,
+        &state.api,
+        kind,
+        &game_version,
+        &loader_version,
+        Some(tx),
+    )
+    .await;
+    let _ = forwarder.await;
+    let installed = installed?;
+
+    // 版本 id 与 loader 记录一起写：两者必须一致，分开写就会有一个是旧的
+    inst.version_id = installed.id.clone();
+    inst.loader = Some(InstanceLoader {
+        kind,
+        version: loader_version,
+        game_version,
+    });
+    instance::save(&state.paths, &inst)?;
+    Ok(inst)
+}
+
+/// 卸掉 loader，回到原版（版本 id 换回游戏版本；loader 记录清空）。
+///
+/// 原版必须已经装好，否则实例会指向一个不存在的版本——那比拒绝这次操作糟糕得多。
+#[tauri::command]
+pub async fn loader_remove(
+    state: State<'_, Arc<AppState>>,
+    slug: String,
+) -> Result<Instance, Error> {
+    require_stopped(&state, &slug).await?;
+    let paths = state.paths.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut inst = instance::load(&paths, &slug)?;
+        let Some(loader) = inst.loader.clone() else {
+            return Err(Error::Invalid("this instance has no loader".into()));
+        };
+        if !runner::installed_version_path(&paths, &loader.game_version).is_file() {
+            return Err(Error::NotFound(format!(
+                "vanilla {} is not installed (先安装原版再卸 loader)",
+                loader.game_version
+            )));
+        }
+        inst.version_id = loader.game_version;
+        inst.loader = None;
+        instance::save(&paths, &inst)?;
+        Ok(inst)
+    })
+    .await
+    .map_err(join_err)?
 }
 
 // ---------------------------------------------------------------------------
