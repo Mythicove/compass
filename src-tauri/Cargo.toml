@@ -5,7 +5,7 @@ description = "Mythic Compass — Mythicove 的 Minecraft 启动器（原生启�
 authors = ["Mythicove"]
 edition = "2024"
 license = "Elastic-License-2.0"
-repository = "https://github.com/Mythicove/compass"
+repository = "https://github.com/Mythicove/mythic-compass"
 homepage = "https://docs.mythicove.com"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
