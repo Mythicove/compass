@@ -43,11 +43,12 @@ fn parses_real_mod_jars() {
         let meta = content::read_mod_meta(jar)
             .unwrap_or_else(|| panic!("{} 解析不出元数据", name_of(jar)));
         println!(
-            "{:<44} {:<22} {:<14} {:?}",
+            "{:<44} {:<22} {:<14} {:?} deps={:?}",
             name_of(jar),
             meta.name,
             meta.version,
-            meta.loaders
+            meta.loaders,
+            meta.depends
         );
         // 空的 id/version 意味着解析器读到了文件却拿错了字段——那比读不出来更糟，
         // 因为 UI 会显示一个空白名字而不是回落到文件名
@@ -65,6 +66,77 @@ fn parses_real_mod_jars() {
             meta.version
         );
         assert!(!meta.loaders.is_empty(), "{}: 没识别出加载器", name_of(jar));
+
+        // 依赖列表的不变量：排序 + 去重 + 有上限（三种元数据格式共用同一条规则）
+        let mut sorted = meta.depends.clone();
+        sorted.sort();
+        assert_eq!(sorted, meta.depends, "{}: 依赖没排序", name_of(jar));
+        let mut deduped = meta.depends.clone();
+        deduped.dedup();
+        assert_eq!(
+            deduped.len(),
+            meta.depends.len(),
+            "{}: 依赖有重复",
+            name_of(jar)
+        );
+        assert!(meta.depends.len() <= 64, "{}: 依赖超出上限", name_of(jar));
+
+        // 已知样本的具体断言：值来自真 jar 里的真元数据。写成条件断言是为了换样本时
+        // 不会假失败，但样本在的时候必须验到具体形状。
+        match meta.id.as_str() {
+            // sodium 的 fabric.mod.json 里 minecraft 的约束是**数组** ["1.21.4"]，
+            // fabricloader 是字符串 ">=0.16.0"，另有一堆 "*"（任意版本，只显示 modId）
+            "sodium" => {
+                assert!(
+                    meta.depends.iter().any(|d| d == "minecraft 1.21.4"),
+                    "数组形式的约束没解析出来：{:?}",
+                    meta.depends
+                );
+                assert!(
+                    meta.depends.iter().any(|d| d == "fabricloader >=0.16.0"),
+                    "{:?}",
+                    meta.depends
+                );
+                assert!(
+                    meta.depends
+                        .iter()
+                        .any(|d| d == "fabric-resource-loader-v0"),
+                    "`*` 约束应当只显示 modId：{:?}",
+                    meta.depends
+                );
+                assert!(
+                    !meta.depends.iter().any(|d| d.contains('*')),
+                    "`*` 不该出现在显示里：{:?}",
+                    meta.depends
+                );
+                // breaks（冲突列表）不是依赖；混进来会给出相反的建议
+                assert!(
+                    !meta.depends.iter().any(|d| d.contains("optifabric")),
+                    "{:?}",
+                    meta.depends
+                );
+            }
+            // JEI 的 neoforge/forge mods.toml 把依赖挂在 [[dependencies.<modId>]] 下
+            "jei" if meta.loaders.iter().any(|l| l == "neoforge" || l == "forge") => {
+                assert!(
+                    meta.depends.iter().any(|d| d.starts_with("minecraft ")),
+                    "mods.toml 的 dependencies.<modId> 表没被遍历到：{:?}",
+                    meta.depends
+                );
+            }
+            // 1.12 的 mcmod.info 里 `dependencies` 常常就是空数组（真样本正是 []）。
+            // 空是数据本身如此，不是解析失败——所以这里只认 loader，不断言有内容。
+            // 第一版按 mod id 匹配，把 legacy 的 JEI 也算进 toml 断言里，于是假失败。
+            "jei" => {
+                assert_eq!(
+                    meta.loaders,
+                    vec!["legacy".to_string()],
+                    "{:?}",
+                    meta.loaders
+                );
+            }
+            _ => {}
+        }
         seen_loaders.extend(meta.loaders.iter().cloned());
     }
     println!("loaders seen: {seen_loaders:?}");

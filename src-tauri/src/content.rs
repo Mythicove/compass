@@ -68,7 +68,16 @@ pub struct ModMeta {
     pub id: String,
     pub version: String,
     pub loaders: Vec<String>,
+    /// **必需**依赖，每项是 `"<modId> <版本约束>"`（约束为 `*` 或没有时只留 modId）。
+    /// 只收必需项：把 optional / incompatible 也列进来，用户会以为"缺了这个就起不来"。
+    /// 这里只做展示，不做版本区间求值——那需要一套 semver range 解析器，
+    /// 而"看起来判定了兼容性但判错"比"不判定"更糟（见 P3）。
+    pub depends: Vec<String>,
 }
+
+/// 依赖数量上限。一个 jar 里的元数据是别人写的，不设上限就等于让别人的文件
+/// 决定我们往 UI 塞多少字符串。
+const MAX_DEPENDS: usize = 64;
 
 /// 列表里的一行。`file_name` 是实例内容目录下的裸文件名（禁用时是 `disabled/` 下的名字）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -156,6 +165,30 @@ fn stem_of(file_name: &str) -> String {
 // mod 元数据解析
 // ---------------------------------------------------------------------------
 
+/// fabric `depends` 的值：可能是字符串（`">=0.16.0"`），也可能是字符串数组
+/// （sodium 的 `"minecraft": ["1.21.4"]` 就是数组）。
+///
+/// 只按一种形状解析会让**整个** `fabric.mod.json` 解码失败，于是这个 mod 从
+/// "有元数据"退化成"读不出名字"——比不解析依赖糟糕得多。真样本见
+/// `tests/real_mods.rs`（sodium 0.6.13 同时用了两种写法）。
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum DepValue {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl DepValue {
+    fn constraint(&self) -> String {
+        match self {
+            DepValue::One(s) => s.clone(),
+            DepValue::Many(v) => v.join(" "),
+        }
+    }
+}
+
+/// 用 BTreeMap 而不是 HashMap：依赖列表要按 modId 稳定排序，
+/// 否则同一个 jar 每次扫描出来的顺序都可能不同，UI 上看着像在变。
 #[derive(Deserialize)]
 struct FabricModJson {
     #[serde(default)]
@@ -164,6 +197,8 @@ struct FabricModJson {
     name: Option<String>,
     #[serde(default)]
     version: Option<String>,
+    #[serde(default)]
+    depends: std::collections::BTreeMap<String, DepValue>,
 }
 
 #[derive(Deserialize)]
@@ -180,6 +215,8 @@ struct QuiltLoader {
     version: Option<String>,
     #[serde(default)]
     metadata: Option<QuiltMetadata>,
+    #[serde(default)]
+    depends: Vec<QuiltDep>,
 }
 
 #[derive(Deserialize)]
@@ -188,12 +225,30 @@ struct QuiltMetadata {
     name: Option<String>,
 }
 
+/// quilt 的依赖项：裸字符串，或带 `versions` / `optional` 的对象。
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum QuiltDep {
+    Id(String),
+    Full {
+        id: String,
+        #[serde(default)]
+        versions: Option<DepValue>,
+        #[serde(default)]
+        optional: bool,
+    },
+}
+
 /// Forge 1.13+ / NeoForge 的 `mods.toml`。只取第一个 `[[mods]]`：
 /// 多 mod 的 jar 极少，且第一个通常就是主 mod。
 #[derive(Deserialize)]
 struct ModsToml {
     #[serde(default)]
     mods: Vec<TomlMod>,
+    /// 依赖挂在 `dependencies.<本 mod 的 modId>` 下（真样本：JEI 的 neoforge.mods.toml
+    /// 写的是 `[[dependencies.jei]]`），所以要遍历这张表的所有值。
+    #[serde(default)]
+    dependencies: std::collections::BTreeMap<String, Vec<TomlDep>>,
 }
 
 #[derive(Deserialize)]
@@ -206,6 +261,31 @@ struct TomlMod {
     display_name: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct TomlDep {
+    #[serde(default, rename = "modId")]
+    mod_id: String,
+    #[serde(default, rename = "versionRange")]
+    version_range: String,
+    /// NeoForge 用 `type`：required / optional / incompatible / discouraged
+    #[serde(default, rename = "type")]
+    dep_type: String,
+    /// Forge 1.13+ 用 `mandatory`
+    #[serde(default)]
+    mandatory: Option<bool>,
+}
+
+impl TomlDep {
+    /// 只算必需依赖。把 `incompatible` 也列进来的话，用户会以为"缺了它才起不来"，
+    /// 而它的意思恰恰相反（装了才起不来）。
+    fn required(&self) -> bool {
+        if !self.dep_type.is_empty() {
+            return self.dep_type == "required";
+        }
+        self.mandatory != Some(false)
+    }
+}
+
 /// 1.12 及更早的 `mcmod.info`（一个数组）。
 #[derive(Deserialize)]
 struct McModInfo {
@@ -215,9 +295,41 @@ struct McModInfo {
     name: Option<String>,
     #[serde(default)]
     version: Option<String>,
+    #[serde(default)]
+    dependencies: Vec<String>,
 }
 
 const METADATA_LIMIT: u64 = 512 * 1024;
+
+/// 依赖项的统一格式化：`"<modId> <约束>"`，约束为 `*`（任意版本）时只留 modId。
+/// 上限 `MAX_DEPENDS`——元数据是别人写的，不设上限等于让别人的文件决定 UI 里塞多少行。
+///
+/// **在这里统一排序**：fabric 的 depends 是对象（天然按 key 有序），
+/// 而 toml 与 quilt 是数组（声明顺序）。不统一的话同一个 mod 的 Fabric 版与
+/// NeoForge 版会给出不同顺序，看起来像列表在乱跳。排序只在这一处。
+fn dep_list<I, S>(pairs: I) -> Vec<String>
+where
+    I: IntoIterator<Item = (S, String)>,
+    S: AsRef<str>,
+{
+    let mut out: Vec<String> = pairs
+        .into_iter()
+        .map(|(id, constraint)| {
+            let id = id.as_ref().trim();
+            let c = constraint.trim();
+            if c.is_empty() || c == "*" {
+                id.to_string()
+            } else {
+                format!("{id} {c}")
+            }
+        })
+        .filter(|s| !s.is_empty())
+        .collect();
+    out.sort();
+    out.dedup();
+    out.truncate(MAX_DEPENDS);
+    out
+}
 
 /// 从 jar 里读 mod 元数据。任何一步失败都返回 None（调用方降级为文件名）。
 ///
@@ -260,6 +372,9 @@ pub fn read_mod_meta(path: &Path) -> Option<ModMeta> {
                         id: f.id,
                         version: f.version.unwrap_or_default(),
                         loaders: Vec::new(),
+                        depends: dep_list(
+                            f.depends.into_iter().map(|(id, v)| (id, v.constraint())),
+                        ),
                     })
             }
             "quilt.mod.json" => serde_json::from_str::<QuiltModJson>(&text)
@@ -276,6 +391,14 @@ pub fn read_mod_meta(path: &Path) -> Option<ModMeta> {
                         id: l.id,
                         version: l.version.unwrap_or_default(),
                         loaders: Vec::new(),
+                        depends: dep_list(l.depends.into_iter().filter_map(|d| match d {
+                            QuiltDep::Id(id) => Some((id, String::new())),
+                            // optional 的依赖缺了也能跑，列出来只会让人以为必须装
+                            QuiltDep::Full { optional: true, .. } => None,
+                            QuiltDep::Full { id, versions, .. } => {
+                                Some((id, versions.map(|v| v.constraint()).unwrap_or_default()))
+                            }
+                        })),
                     }
                 }),
             "mcmod.info" => serde_json::from_str::<Vec<McModInfo>>(&text)
@@ -286,18 +409,32 @@ pub fn read_mod_meta(path: &Path) -> Option<ModMeta> {
                     id: m.modid,
                     version: m.version.unwrap_or_default(),
                     loaders: Vec::new(),
+                    // mcmod.info 的 dependencies 只有 modId，没有版本约束
+                    depends: dep_list(m.dependencies.into_iter().map(|id| (id, String::new()))),
                 }),
             _ => text
                 .parse::<toml::Table>()
                 .ok()
                 .and_then(|t| t.try_into::<ModsToml>().ok())
-                .and_then(|t| t.mods.into_iter().next())
-                .map(|m| ModMeta {
-                    name: m.display_name.unwrap_or_else(|| m.mod_id.clone()),
-                    id: m.mod_id,
-                    // Forge 常写 `${file.jarVersion}`，那是构建期占位符，见下面的兜底
-                    version: m.version.unwrap_or_default(),
-                    loaders: Vec::new(),
+                .and_then(|t| {
+                    // 依赖挂在 `dependencies.<本 mod 的 modId>` 下，可能有多个键
+                    // （多 mod jar），所以把所有值都收进来，而不是只取自己那个
+                    let deps: Vec<(String, String)> = t
+                        .dependencies
+                        .values()
+                        .flatten()
+                        .filter(|d| d.required() && !d.mod_id.is_empty())
+                        .map(|d| (d.mod_id.clone(), d.version_range.clone()))
+                        .collect();
+                    let m = t.mods.into_iter().next()?;
+                    Some(ModMeta {
+                        name: m.display_name.unwrap_or_else(|| m.mod_id.clone()),
+                        id: m.mod_id,
+                        // Forge 常写 `${file.jarVersion}`，那是构建期占位符，见下面的兜底
+                        version: m.version.unwrap_or_default(),
+                        loaders: Vec::new(),
+                        depends: dep_list(deps),
+                    })
                 }),
         };
         if let Some(mut meta) = meta {
@@ -778,6 +915,178 @@ mod tests {
         let m2 = read_mod_meta(&legacy).unwrap();
         assert_eq!((m2.name.as_str(), m2.id.as_str()), ("Old Mod", "oldmod"));
         assert_eq!(m2.loaders, vec!["legacy"]);
+    }
+
+    #[test]
+    fn parses_fabric_dependencies_whether_the_constraint_is_a_string_or_a_list() {
+        // 真样本（sodium 0.6.13）里两种写法同时出现：`"minecraft": ["1.21.4"]` 是数组，
+        // `"fabricloader": ">=0.16.0"` 是字符串。只按一种解析会让整个 fabric.mod.json
+        // 解码失败，于是这个 mod 从"有元数据"退化成"读不出名字"。
+        let d = tmp();
+        let jar = d.path().join("mods/sodium.jar");
+        fake_jar(
+            &jar,
+            &[(
+                "fabric.mod.json",
+                r#"{
+                    "schemaVersion": 1, "id": "sodium", "version": "0.6.13", "name": "Sodium",
+                    "depends": {
+                        "minecraft": ["1.21.4"],
+                        "fabricloader": ">=0.16.0",
+                        "fabric-resource-loader-v0": "*",
+                        "fabric-rendering-fluids-v1": [">=2.0.0", "<3.0.0"]
+                    },
+                    "breaks": { "optifabric": "*" }
+                }"#,
+            )],
+        );
+        let meta = read_mod_meta(&jar).unwrap();
+        assert_eq!(meta.name, "Sodium");
+        assert_eq!(
+            meta.depends,
+            vec![
+                // BTreeMap ⇒ 按 modId 稳定排序（HashMap 的话每次扫描顺序都可能不同）
+                "fabric-rendering-fluids-v1 >=2.0.0 <3.0.0",
+                // `*` 是"任意版本"，写出来只是噪音
+                "fabric-resource-loader-v0",
+                "fabricloader >=0.16.0",
+                "minecraft 1.21.4",
+            ],
+            "{:?}",
+            meta.depends
+        );
+        // breaks 是"与这些 mod 冲突"，不是依赖，混进来会给出完全相反的建议
+        assert!(
+            !meta.depends.iter().any(|x| x.contains("optifabric")),
+            "{:?}",
+            meta.depends
+        );
+    }
+
+    #[test]
+    fn parses_forge_dependencies_and_keeps_only_the_required_ones() {
+        let d = tmp();
+        let jar = d.path().join("mods/jei.jar");
+        // 真样本（JEI 的 neoforge.mods.toml）用 `[[dependencies.<自己的 modId>]]`，
+        // 所以依赖不在顶层，得遍历 dependencies 表的所有值
+        fake_jar(
+            &jar,
+            &[(
+                "META-INF/neoforge.mods.toml",
+                r#"modLoader="javafml"
+loaderVersion="[4,)"
+[[mods]]
+modId="jei"
+version="20.0.0.4"
+displayName="Just Enough Items"
+[[dependencies.jei]]
+modId="neoforge"
+type="required"
+versionRange="[21.4.121,)"
+[[dependencies.jei]]
+modId="minecraft"
+type="required"
+versionRange="[1.21.4, 1.21.5)"
+[[dependencies.jei]]
+modId="some_optional"
+type="optional"
+versionRange="*"
+[[dependencies.jei]]
+modId="conflicting_mod"
+type="incompatible"
+versionRange="*"
+"#,
+            )],
+        );
+        let meta = read_mod_meta(&jar).unwrap();
+        assert_eq!(meta.id, "jei");
+        assert_eq!(meta.loaders, vec!["neoforge"]);
+        assert_eq!(
+            meta.depends,
+            vec!["minecraft [1.21.4, 1.21.5)", "neoforge [21.4.121,)"],
+            "{:?}",
+            meta.depends
+        );
+    }
+
+    #[test]
+    fn legacy_forge_uses_mandatory_instead_of_type() {
+        let d = tmp();
+        let jar = d.path().join("mods/oldforge.jar");
+        fake_jar(
+            &jar,
+            &[(
+                "META-INF/mods.toml",
+                r#"modLoader="javafml"
+[[mods]]
+modId="oldforge"
+version="1.0"
+displayName="Old Forge Mod"
+[[dependencies.oldforge]]
+modId="forge"
+mandatory=true
+versionRange="[36,)"
+[[dependencies.oldforge]]
+modId="not_needed"
+mandatory=false
+versionRange="*"
+"#,
+            )],
+        );
+        let meta = read_mod_meta(&jar).unwrap();
+        assert_eq!(meta.depends, vec!["forge [36,)"], "{:?}", meta.depends);
+    }
+
+    #[test]
+    fn quilt_dependencies_come_from_the_loader_section() {
+        let d = tmp();
+        let jar = d.path().join("mods/quilted.jar");
+        fake_jar(
+            &jar,
+            &[(
+                "quilt.mod.json",
+                r#"{
+                    "schema_version": 1,
+                    "quilt_loader": {
+                        "id": "qmod", "version": "2.1",
+                        "metadata": { "name": "Quilted Mod" },
+                        "depends": [
+                            { "id": "minecraft", "versions": "1.20.1" },
+                            { "id": "qsl" },
+                            "fabric-api",
+                            { "id": "maybe", "versions": "*", "optional": true }
+                        ]
+                    }
+                }"#,
+            )],
+        );
+        let meta = read_mod_meta(&jar).unwrap();
+        assert_eq!(
+            meta.depends,
+            vec!["fabric-api", "minecraft 1.20.1", "qsl"],
+            "{:?}",
+            meta.depends
+        );
+    }
+
+    #[test]
+    fn dependency_lists_are_bounded() {
+        // 元数据是别人写的：不设上限就等于让别人的 jar 决定我们往 UI 塞多少行
+        let d = tmp();
+        let jar = d.path().join("mods/many.jar");
+        let depends: Vec<String> = (0..500).map(|i| format!("\"dep{i}\": \"*\"")).collect();
+        fake_jar(
+            &jar,
+            &[(
+                "fabric.mod.json",
+                &format!(
+                    "{{\"id\":\"many\",\"version\":\"1\",\"name\":\"Many\",\"depends\":{{{}}}}}",
+                    depends.join(",")
+                ),
+            )],
+        );
+        let meta = read_mod_meta(&jar).unwrap();
+        assert_eq!(meta.depends.len(), MAX_DEPENDS, "{:?}", meta.depends.len());
     }
 
     #[test]

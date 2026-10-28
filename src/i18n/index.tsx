@@ -51,6 +51,10 @@ const zhCN: Messages = {
   "content.col.id": "ID",
   "content.col.version": "版本",
   "content.col.loader": "加载器",
+  "content.col.depends": "依赖",
+  "content.dependsCount": "{n} 项",
+  "content.dependsHint":
+    "依赖只做展示（把鼠标停在数量上可看完整清单）：启动器不求值版本区间、也不检查缺失，那要等 P3 的依赖解析。",
   "content.col.size": "大小",
   "content.col.state": "状态",
   "content.enabled": "已启用",
@@ -231,6 +235,10 @@ const en: Messages = {
   "content.col.id": "ID",
   "content.col.version": "Version",
   "content.col.loader": "Loader",
+  "content.col.depends": "Depends",
+  "content.dependsCount": "{n}",
+  "content.dependsHint":
+    "Dependencies are shown for information only (hover the count for the full list): the launcher doesn't evaluate version ranges or check for missing ones — that needs P3's dependency resolution.",
   "content.col.size": "Size",
   "content.col.state": "State",
   "content.enabled": "Enabled",

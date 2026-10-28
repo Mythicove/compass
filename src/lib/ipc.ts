@@ -171,6 +171,9 @@ export interface ModMeta {
   id: string;
   version: string;
   loaders: string[];
+  /** 必需依赖，每项形如 `"<modId> <版本约束>"`（约束为任意版本时只有 modId）。
+   *  已排序去重；只展示，不做版本区间求值。 */
+  depends: string[];
 }
 
 export interface ContentItem {

@@ -237,6 +237,7 @@ export function ContentView({ initialSlug }: { initialSlug?: string }) {
               </p>
             )}
             {kind !== "mods" && <p className="muted small">{t("content.enableHint")}</p>}
+            {kind === "mods" && <p className="muted small">{t("content.dependsHint")}</p>}
             <p className="muted small">{t("content.dropHint")}</p>
 
             {listing && listing.items.length === 0 && <p className="muted">{t("content.empty")}</p>}
@@ -249,6 +250,7 @@ export function ContentView({ initialSlug }: { initialSlug?: string }) {
                     <th>{t("content.col.id")}</th>
                     <th>{t("content.col.version")}</th>
                     <th>{t("content.col.loader")}</th>
+                    <th>{t("content.col.depends")}</th>
                     <th className="num">{t("content.col.size")}</th>
                     <th>{t("content.col.state")}</th>
                     <th />
@@ -266,6 +268,16 @@ export function ContentView({ initialSlug }: { initialSlug?: string }) {
                       <td className="muted small">{item.meta?.id ?? "—"}</td>
                       <td className="muted small">{item.meta?.version ?? "—"}</td>
                       <td className="muted small">{item.meta?.loaders.join(" + ") || "—"}</td>
+                      <td className="muted small">
+                        {item.meta && item.meta.depends.length > 0 ? (
+                          // 完整清单放 title：一列里塞七八个 modId 会把表格挤变形
+                          <span title={item.meta.depends.join("\n")}>
+                            {t("content.dependsCount", { n: item.meta.depends.length })}
+                          </span>
+                        ) : (
+                          "—"
+                        )}
+                      </td>
                       <td className="num muted small">{mb(item.size)}</td>
                       <td>
                         {kind === "mods" ? (
