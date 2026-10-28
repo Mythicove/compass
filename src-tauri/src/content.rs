@@ -918,24 +918,106 @@ mod tests {
     }
 
     #[test]
-    fn content_operations_reject_traversal() {
+    fn content_operations_reject_traversal_in_file_names() {
         let d = tmp();
         let game = d.path().join(".minecraft");
         std::fs::create_dir_all(&game).unwrap();
         std::fs::write(d.path().join("secret.txt"), b"secret").unwrap();
-        for name in ["../secret.txt", "..\\secret.txt", "../../etc/passwd"] {
-            assert!(remove(&game, Kind::Mods, name).is_err(), "{name}");
-            assert!(set_enabled(&game, name, false).is_err(), "{name}");
+
+        // 文件名参数里出现分隔符或 .. 一律拒绝：内容操作只接受实例目录内的裸文件名
+        for name in [
+            "../secret.txt",
+            "..\\secret.txt",
+            "a/b.jar",
+            "a\\b.jar",
+            ".",
+            "..",
+        ] {
+            assert!(remove(&game, Kind::Mods, name).is_err(), "remove {name:?}");
             assert!(
-                import(&game, Kind::Mods, &[d.path().join(name)]).is_err(),
-                "{name}"
+                set_enabled(&game, name, false).is_err(),
+                "set_enabled {name:?}"
             );
         }
-        // 目录外的文件确实没被碰过
+        // 源路径本身的文件名不合法时也拒绝（拖进来的东西叫 `..` 会写到目录外）
+        for name in ["..", "../.."] {
+            assert!(
+                import(
+                    &game,
+                    Kind::Mods,
+                    std::slice::from_ref(&d.path().join(name))
+                )
+                .is_err(),
+                "import {name:?}"
+            );
+        }
+        // 目录外的文件没被碰过
         assert_eq!(
             std::fs::read_to_string(d.path().join("secret.txt")).unwrap(),
             "secret"
         );
+    }
+
+    #[test]
+    fn import_from_anywhere_always_writes_inside_the_content_dir() {
+        // 源路径**可以**在磁盘任何位置：那是原生文件选择器给的、用户显式选的，
+        // 要求"源必须在数据目录内"等于让导入功能没法用。
+        // 真正的保证是写入点：永远落在 `<game_dir>/<kind>/` 里，且用源的裸文件名。
+        // 所以哪怕源写成 `../../secret.txt`，结果也只会是 `mods/secret.txt`。
+        let d = tmp();
+        let game = d.path().join(".minecraft");
+        let outside = d.path().join("elsewhere");
+        std::fs::create_dir_all(&outside).unwrap();
+        // mods/ 要先存在：下面的穿越路径靠文件系统解析 `..`，中间目录不在就 ENOENT
+        std::fs::create_dir_all(game.join("mods")).unwrap();
+        std::fs::write(outside.join("pack.zip"), b"zip").unwrap();
+        std::fs::write(d.path().join("secret.txt"), b"secret").unwrap();
+
+        let done = import(
+            &game,
+            Kind::Resourcepacks,
+            std::slice::from_ref(&outside.join("pack.zip")),
+        )
+        .unwrap();
+        assert_eq!(done, vec!["pack.zip"]);
+        assert_eq!(
+            std::fs::read(game.join("resourcepacks/pack.zip")).unwrap(),
+            b"zip"
+        );
+        // 导入是复制不是移动
+        assert!(outside.join("pack.zip").is_file());
+
+        // 穿越形式的源路径：file_name() 是裸名，所以写进 mods/，不会跑出内容目录。
+        // 注意这条路径要穿过**真实存在**的目录：`..` 是靠文件系统解析的，
+        // 中间目录不存在时 stat 直接 ENOENT（这一点的平台差异见 CI 记录）。
+        let traversing = game.join("mods/../../secret.txt");
+        assert!(traversing.is_file(), "样本路径本身要能解析到真文件");
+        let done = import(&game, Kind::Mods, std::slice::from_ref(&traversing)).unwrap();
+        assert_eq!(done, vec!["secret.txt"]);
+        assert_eq!(
+            std::fs::read(game.join("mods/secret.txt")).unwrap(),
+            b"secret"
+        );
+        // 源文件没被移动或删除
+        assert_eq!(
+            std::fs::read_to_string(d.path().join("secret.txt")).unwrap(),
+            "secret"
+        );
+        // 写入点没有跑到内容目录之外：游戏目录里除了 mods/ 与 resourcepacks/ 不该多出东西
+        let mut top: Vec<String> = std::fs::read_dir(&game)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        top.sort();
+        assert_eq!(top, vec!["mods", "resourcepacks"], "{top:?}");
+        let mut in_mods: Vec<String> = std::fs::read_dir(game.join("mods"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        in_mods.sort();
+        assert_eq!(in_mods, vec!["secret.txt"], "{in_mods:?}");
     }
 
     #[test]
