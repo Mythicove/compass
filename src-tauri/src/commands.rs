@@ -12,7 +12,6 @@ use tokio::sync::Notify;
 
 use crate::account::{self, Account, AccountView, now_unix};
 use crate::api::{Project, SearchResponse, Version, png_data_url};
-use crate::authlibinjector;
 use crate::config::{self, Config};
 use crate::error::Error;
 use crate::install::{InstalledVersion, Installer};
@@ -21,10 +20,9 @@ use crate::java::{self, JavaRuntime};
 use crate::launch;
 use crate::meta::{ManifestEntry, MetaClient};
 use crate::net::Downloader;
-use crate::paths::{Paths, PathsInfo};
+use crate::paths::PathsInfo;
 use crate::runner;
 use crate::state::{AppState, GameExit, RunningGame};
-use crate::version::{OsInfo, VersionJson};
 
 /// 前端订阅的事件名：下载进度 / 游戏日志 / 游戏退出。
 pub const PROGRESS_EVENT: &str = "compass://progress";
@@ -297,12 +295,7 @@ pub async fn instance_delete(state: State<'_, Arc<AppState>>, slug: String) -> R
 #[tauri::command]
 pub async fn instance_ready(state: State<'_, Arc<AppState>>, slug: String) -> Result<bool, Error> {
     let inst = instance::load(&state.paths, &slug)?;
-    Ok(state
-        .paths
-        .versions()
-        .join(&inst.version_id)
-        .join(format!("{}.json", inst.version_id))
-        .is_file())
+    Ok(runner::installed_version_path(&state.paths, &inst.version_id).is_file())
 }
 
 /// 探测这个实例会用哪个 Java（UI 展示 + 让用户在启动前就知道缺 Java）。
@@ -315,7 +308,7 @@ pub async fn instance_java(
     if let Some(p) = &inst.java_path {
         return Ok(java::probe(p).await);
     }
-    let version = read_installed_version(&state.paths, &inst.version_id)?;
+    let version = runner::read_installed_version(&state.paths, &inst.version_id)?;
     let (major, exact) = runner::java_requirement(&version);
     Ok(java::find(major, exact, Some(&state.paths.java())).await)
 }
@@ -354,58 +347,17 @@ pub async fn instance_launch(
         .clone()
         .ok_or(Error::NotSignedIn)?;
     let inst = instance::load(&state.paths, &slug)?;
-    let version = read_installed_version(&state.paths, &inst.version_id)?;
-    let os = OsInfo::current();
-
-    // Java：实例指定优先，否则按版本要求探测（老版本必须正好是 Java 8）
-    let (major, exact) = runner::java_requirement(&version);
-    let runtime = match &inst.java_path {
-        Some(p) => java::probe(p)
-            .await
-            .ok_or_else(|| Error::Config(format!("{} is not a usable java", p.display())))?,
-        None => java::find(major, exact, Some(&state.paths.java()))
-            .await
-            .ok_or_else(|| {
-                Error::Config(format!(
-                    "no Java {major} runtime found (安装 JDK {major} 或在设置里指定路径)"
-                ))
-            })?,
-    };
-
-    // authlib-injector：没有它游戏能启动，但认不到我们的皮肤站
-    let dl = Downloader::new(
-        state.http.clone(),
-        cfg.download.concurrency,
-        cfg.download.mirror.clone(),
-    );
-    let injector = authlibinjector::ensure(&state.paths, &dl).await?;
-    let meta = MetaClient::new(state.http.clone(), cfg.download.mirror.clone());
-    let prefetched = authlibinjector::prefetch_meta(&meta, &cfg.api_url).await;
-
-    let input = runner::LaunchInput {
-        instance: &inst,
-        account: &account,
-        version: &version,
-        os: &os,
-        paths: &state.paths,
-        default_memory_mb: cfg.defaults.memory_mb,
-        api_url: &cfg.api_url,
-        java: runtime.path.clone(),
-        authlib_jar: Some(injector),
-        prefetched_meta: prefetched,
-    };
-    let plan = runner::build(&input)?;
-    let natives = runner::natives_to_extract(&input);
-    let natives_dir = instance::natives_dir(&state.paths, &slug)?;
-    launch::extract_natives(&natives, &natives_dir)?;
+    // 启动编排（读版本 / 选 Java / 备 injector / 拼命令行 / 解压 natives）只有一份实现，
+    // 在 runner 里；冒烟测试走同一条路径，所以它测的就是用户会跑到的代码。
+    let prepared = runner::prepare_launch(&state.paths, &state.http, &cfg, &inst, &account).await?;
+    let plan = prepared.plan;
 
     let info = LaunchInfo {
         instance: slug.clone(),
         version_id: inst.version_id.clone(),
-        java: runtime.path.clone(),
-        java_version: runtime.version,
+        java: plan.program.clone(),
+        java_version: prepared.java_version,
     };
-
     // 先登记"正在运行"再拉起进程：反过来的话，进程可能在登记之前就退出了
     let kill = Arc::new(Notify::new());
     *state.running.write().await = Some(RunningGame {
@@ -477,18 +429,4 @@ pub async fn game_running(state: State<'_, Arc<AppState>>) -> Result<Option<Stri
         .await
         .as_ref()
         .map(|r| r.instance.clone()))
-}
-
-/// 读安装期落盘的合并版本 JSON。
-fn read_installed_version(paths: &Paths, version_id: &str) -> Result<VersionJson, Error> {
-    let file = paths
-        .versions()
-        .join(version_id)
-        .join(format!("{version_id}.json"));
-    let text = std::fs::read_to_string(&file).map_err(|_| {
-        Error::Invalid(format!(
-            "version {version_id} is not installed (先安装该版本)"
-        ))
-    })?;
-    VersionJson::parse(&text).map_err(|e| Error::Config(format!("{}: {e}", file.display())))
 }

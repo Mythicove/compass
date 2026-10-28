@@ -7,10 +7,14 @@ use std::path::PathBuf;
 
 use crate::account::Account;
 use crate::authlibinjector;
+use crate::config::Config;
 use crate::error::Error;
 use crate::install::split_libraries;
 use crate::instance::{self, Instance};
+use crate::java;
 use crate::launch::{self, LaunchOptions, LaunchPlan};
+use crate::meta::MetaClient;
+use crate::net::Downloader;
 use crate::paths::Paths;
 use crate::version::{OsInfo, VersionJson};
 
@@ -149,6 +153,103 @@ pub fn build(input: &LaunchInput) -> Result<LaunchPlan, Error> {
 /// natives 解压清单（每次启动前重建）。
 pub fn natives_to_extract(input: &LaunchInput) -> Vec<(PathBuf, Vec<String>)> {
     split_libraries(input.version, input.os, input.paths).1
+}
+
+/// 一次启动所需的全部产物：命令行 + 用哪个 Java。
+pub struct PreparedLaunch {
+    pub plan: LaunchPlan,
+    pub java_version: u32,
+    /// 是否成功注入了 authlib-injector（没注入也能启动，只是认不到我们的皮肤站）。
+    pub injected: bool,
+}
+
+/// 启动编排的**唯一实现**：读已装版本 → 选 Java → 备 authlib-injector → 拼命令行 → 解压 natives。
+///
+/// 命令层与冒烟测试都走这里，避免"测试里重写一遍顺序"——那种测试只能证明它自己是对的。
+pub async fn prepare_launch(
+    paths: &Paths,
+    http: &reqwest::Client,
+    cfg: &Config,
+    inst: &Instance,
+    account: &Account,
+) -> Result<PreparedLaunch, Error> {
+    let version = read_installed_version(paths, &inst.version_id)?;
+    let os = OsInfo::current();
+
+    // Java：实例指定优先，否则按版本要求探测（老版本必须正好是 Java 8）
+    let (major, exact) = java_requirement(&version);
+    let runtime = match &inst.java_path {
+        Some(p) => java::probe(p)
+            .await
+            .ok_or_else(|| Error::Config(format!("{} is not a usable java", p.display())))?,
+        None => java::find(major, exact, Some(&paths.java()))
+            .await
+            .ok_or_else(|| {
+                Error::Config(format!(
+                    "no Java {major} runtime found (安装 JDK {major} 或在实例里指定路径)"
+                ))
+            })?,
+    };
+
+    // authlib-injector：拿不到就不注入（游戏仍能启动，只是没有我们的皮肤），
+    // 但不能因为下载失败就整个启动不了
+    let dl = Downloader::new(
+        http.clone(),
+        cfg.download.concurrency,
+        cfg.download.mirror.clone(),
+    );
+    let injector = authlibinjector::ensure(paths, &dl).await.ok();
+    let prefetched = match &injector {
+        Some(_) => {
+            let meta = MetaClient::new(http.clone(), cfg.download.mirror.clone());
+            authlibinjector::prefetch_meta(&meta, &cfg.api_url).await
+        }
+        None => None,
+    };
+
+    let input = LaunchInput {
+        instance: inst,
+        account,
+        version: &version,
+        os: &os,
+        paths,
+        default_memory_mb: cfg.defaults.memory_mb,
+        api_url: &cfg.api_url,
+        java: runtime.path.clone(),
+        authlib_jar: injector,
+        prefetched_meta: prefetched.clone(),
+    };
+    let plan = build(&input)?;
+    let natives = natives_to_extract(&input);
+    let natives_dir = instance::natives_dir(paths, &inst.slug)?;
+    launch::extract_natives(&natives, &natives_dir)?;
+    // 以命令行里真的有 -javaagent 为准（而不是"我们下载到了 jar"）：
+    // 注入没生效却报告 injected=true，会让"皮肤不出"的排查从一开始就跑偏
+    let injected = plan.args.iter().any(|a| a.starts_with("-javaagent:"));
+    Ok(PreparedLaunch {
+        plan,
+        java_version: runtime.version,
+        injected,
+    })
+}
+
+/// 安装期落盘的合并版本 JSON 路径（"装没装好"与"读它"共用同一条规则）。
+pub fn installed_version_path(paths: &Paths, version_id: &str) -> PathBuf {
+    paths
+        .versions()
+        .join(version_id)
+        .join(format!("{version_id}.json"))
+}
+
+/// 读安装期落盘的合并版本 JSON。
+pub fn read_installed_version(paths: &Paths, version_id: &str) -> Result<VersionJson, Error> {
+    let file = installed_version_path(paths, version_id);
+    let text = std::fs::read_to_string(&file).map_err(|_| {
+        Error::Invalid(format!(
+            "version {version_id} is not installed (先安装该版本)"
+        ))
+    })?;
+    VersionJson::parse(&text).map_err(|e| Error::Config(format!("{}: {e}", file.display())))
 }
 
 #[cfg(test)]
