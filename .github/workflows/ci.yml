@@ -155,9 +155,13 @@ jobs:
         # - 1.21.4 把打过补丁的 `:client` **列进了** classpath（NeoForge 一个游戏 jar
         #   都不列），而它的 jvm 参数里没有模块路径，所以不存在自动模块名撞车。
         #
-        # 只跑现代版本：legacy（1.12.2）要再下 ~1GB 的旧资源，而它独有的那条路径
-        # （从 installer 的 maven/ 树取产物）已有离线单测钉住，见
-        # forge::tests::installer_maven_tree_is_extracted_into_libraries。
+        # 只跑现代版本：另外三套格式各自要再下一整套旧资源（1.12.2 ~1GB、
+        # 1.16.5 ~700MB、1.8.9 ~1GB），而它们独有的路径都已有离线测试钉住——
+        # 从 installer 的 maven/ 树取产物见 installer_maven_tree_is_extracted_into_libraries，
+        # v0 的内联 versionInfo 与 universal 拷贝见 v0_profiles_carry_the_version_json_inline
+        # 与 legacy_universal_jar_is_copied_to_its_maven_path；五份真 profile
+        # （1.21.4 / 1.16.5 / 1.12.2 / 1.8.9 / 1.7.10）都是未裁剪的原文。
+        # 四套格式的真装在本地都跑过（tests/forge_live.rs 的四个测试），只是不进 CI。
         env:
           COMPASS_FORGE_DIR: ${{ runner.temp }}/compass-live
         run: cargo test --test forge_live -- --ignored --nocapture installs_modern_forge_for_real

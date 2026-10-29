@@ -398,26 +398,31 @@ async fn install_from_installer(
         )));
     }
 
-    // 2. 读 profile 与子版本 JSON（都在 jar 里）
+    // 2. 读 profile 与子版本 JSON。v0（Forge ≤1.8.9）的版本 JSON 内联在 profile 里，
+    //    新格式在 jar 的 `/version.json` 条目里——两种都由 read_installer 统一成同一个返回。
     let (profile, child) = crate::forge::read_installer(&jar)?;
+    let game = profile.game_version().ok_or_else(|| {
+        Error::Config(format!(
+            "{} 的 install_profile.json 没说目标游戏版本（顶层 minecraft 与 install.minecraft 都是空的）",
+            jar.display()
+        ))
+    })?;
 
-    // 2b. installer 自带的 `maven/` 树。Forge 每个版本都恰好有一条 `"url": ""` 的库，
-    //     1.12.2 / 1.16.5 的那个产物只存在于 installer 里面（详见 extract_installer_maven）。
-    //     放在装子版本之前：下载器认"已就位"是靠 sha1，文件先到位它才会跳过那条空 URL 的任务。
+    // 2b. installer 自带的产物。两种落点：
+    //     - `maven/` 树（Forge 1.12.2 / 1.16.5 / 1.21.4 都有）
+    //     - v0 的 universal jar 在 installer **根部**，且它那条库在 Maven 上是 404，
+    //       只能从 installer 里取（实测见 extract_legacy_universal 的注释）
+    //     都放在装子版本之前：下载器认"已就位"是靠 sha1，文件先到位它才会跳过那条任务。
     crate::forge::extract_installer_maven(&jar, &paths.libraries())?;
+    crate::forge::extract_legacy_universal(&jar, &profile, &paths)?;
 
     // 3. 父版本先装好：processor 要拿它的 client jar 当输入
-    installer
-        .install(&profile.minecraft, progress.clone())
-        .await?;
-    let mc_jar = paths
-        .versions()
-        .join(&profile.minecraft)
-        .join(format!("{}.jar", profile.minecraft));
+    installer.install(game, progress.clone()).await?;
+    let mc_jar = paths.versions().join(game).join(format!("{game}.jar"));
     if !mc_jar.is_file() {
         return Err(Error::Config(format!(
             "client jar missing after installing {}: {}",
-            profile.minecraft,
+            game,
             mc_jar.display()
         )));
     }
@@ -433,7 +438,7 @@ async fn install_from_installer(
     if client_steps > 0 {
         // processor 用哪个 Java：按父版本的 majorVersion 探测（1.21.4 → 21）。
         // 用错大版本的话 binarypatcher 会以一句 ASM 版本报错收场，很难看出根因。
-        let parent = crate::runner::read_installed_version(&paths, &profile.minecraft)?;
+        let parent = crate::runner::read_installed_version(&paths, game)?;
         let (major, exact) = crate::runner::java_requirement(&parent);
         let java = crate::java::find(major, exact, Some(&paths.java()))
             .await

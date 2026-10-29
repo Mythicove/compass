@@ -244,6 +244,14 @@ pub struct Library {
     pub size: Option<u64>,
     #[serde(default)]
     pub rules: Option<Vec<Rule>>,
+    /// 旧式库（Forge ≤1.8.9 的 `versionInfo.libraries`）没有 `rules`，
+    /// 用 `clientreq` / `serverreq` 表态。实测 1.8.9 的 19 条库里 `jline` 是
+    /// `serverreq=true, clientreq=false`，而 `launchwrapper` 只写 `serverreq=true`
+    /// （clientreq 缺省 = 客户端也要）。所以只有**显式 false** 才排除。
+    #[serde(default)]
+    pub clientreq: Option<bool>,
+    #[serde(default)]
+    pub serverreq: Option<bool>,
     #[serde(default)]
     pub natives: Option<HashMap<String, String>>,
     #[serde(default)]
@@ -491,6 +499,13 @@ pub fn resolve_libraries(
     let mut out = Vec::new();
     for lib in &v.libraries {
         if !rules_allow(lib.rules.as_deref(), os, features) {
+            continue;
+        }
+        // 旧式库用 clientreq 表态（见 Library 上的注释）。我们只拼**客户端**启动计划，
+        // 所以显式 clientreq=false 的库跳过：留在 classpath 上一般不致命，
+        // 但那是白多一个用不上的 jar，而且会让"classpath 与库列表精确相等"这类
+        // 断言在多平台上出现说不清的差异。
+        if lib.clientreq == Some(false) {
             continue;
         }
         let exclude = lib

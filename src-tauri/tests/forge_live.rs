@@ -167,8 +167,23 @@ async fn installs_modern_forge_for_real() {
 
     let plan = build_plan(&paths, &installed.id, "forge-modern");
     let entries = classpath(&plan);
-    println!("classpath entries: {}", entries.len());
-    assert!(entries.len() > 100, "只有 {} 条", entries.len());
+    // 与库解析器算出的精确集合比对，而不是"至少多少条"：阈值只能证明差不多，
+    // 而 classpath 多一条少一条都是真问题（多的会撞自动模块名，少的启动就 CNFE）
+    let (expected, _) = compass_lib::install::split_libraries(&merged, &OsInfo::current(), &paths)
+        .expect("库列表可解析");
+    let expected: Vec<String> = expected
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    println!(
+        "classpath: {} entries (resolver says {})",
+        entries.len(),
+        expected.len()
+    );
+    assert_eq!(
+        entries, expected,
+        "启动计划里的 classpath 与库解析器算出的不一致"
+    );
     for e in &entries {
         assert!(PathBuf::from(e).is_file(), "classpath entry missing: {e}");
         assert!(
@@ -313,7 +328,34 @@ async fn installs_legacy_forge_for_real() {
 
     let plan = build_plan(&paths, &installed.id, "forge-legacy");
     let entries = classpath(&plan);
-    println!("legacy classpath entries: {}", entries.len());
+    // 与现代版本比，legacy 的 classpath 恰好**多一条**：原版 jar。
+    // 因为 `loader_provides_game_jar` 为 false 时由 runner 自己把它加上去，
+    // 而 1.13+ 是 fml/modlauncher 按坐标找补丁 jar，我们一条都不加。
+    let (expected, _) = compass_lib::install::split_libraries(&merged, &OsInfo::current(), &paths)
+        .expect("库列表可解析");
+    let expected: Vec<String> = expected
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    let without_vanilla: Vec<String> = entries
+        .iter()
+        .filter(|e| !e.ends_with(&format!("{game}.jar")))
+        .cloned()
+        .collect();
+    println!(
+        "legacy classpath: {} entries (resolver says {} + 原版 jar)",
+        entries.len(),
+        expected.len()
+    );
+    assert_eq!(
+        without_vanilla, expected,
+        "去掉原版 jar 之后应当与库解析器算出的完全一致"
+    );
+    assert_eq!(
+        entries.len(),
+        expected.len() + 1,
+        "只该多出原版 jar 这一条，多的少的都是问题"
+    );
     for e in &entries {
         assert!(PathBuf::from(e).is_file(), "classpath entry missing: {e}");
     }
@@ -355,6 +397,325 @@ async fn installs_legacy_forge_for_real() {
         "legacy forge live install ok ({} cp entries)",
         entries.len()
     );
+}
+
+/// 装中间那代 Forge（1.16.5）。这一套是**唯一同时需要 processor pipeline 与
+/// installer 内 `maven/` 树**的：现代 1.21.4 的空 URL 库由 binarypatcher 产出，
+/// legacy 1.12.2 没有 processor，只有 1.16.5 两条路都要走。
+///
+/// 它还有三处与现代版不同的实测事实：
+/// - 4 个 processor **都没有 `sides` 字段** = client 全跑（1.21.4 是 7 个里跑 3 个）；
+/// - 工具链是 `net.md-5:SpecialSource`，不是 AutoRenamingTool；
+/// - MCP_DATA 的参数里有**内联 Maven 坐标**（`[de.oceanlabs.mcp:mcp_config:…@zip]`），
+///   不是 `{VAR}`，替换器必须认。
+///
+/// 需要 Java 8（1.16.5 的版本 JSON 没有 javaVersion 字段 → 按 8 处理），
+/// 所以 `paths.java()` 下要有一个 JDK 8，否则会在探测运行时时失败。
+#[tokio::test]
+#[ignore = "needs network, ~700MB of downloads and a Java 8 runtime"]
+async fn installs_mid_era_forge_for_real() {
+    let game = live::env_or("COMPASS_FORGE_MID_GAME", "1.16.5");
+    let data = live::data_dir("COMPASS_FORGE_MID_DIR");
+    let paths = Paths::new(data.path().to_path_buf());
+    paths.ensure().unwrap();
+    let http = live::http();
+    let api = live::api(&http);
+    let installer = live::installer(&paths, &http);
+
+    let versions = loader::versions(&api, LoaderKind::Forge, &game)
+        .await
+        .unwrap();
+    assert!(!versions.is_empty(), "没列出任何 {game} 的 Forge 版本");
+    // 元数据顺序不可信：1.16.5 那段末尾是 36.0.0，而 36.2.39 在中间
+    let chosen = live::env_or("COMPASS_FORGE_MID_VERSION", &versions[0].version);
+    println!(
+        "mid-era forge for {game}: {} versions (chosen {chosen})",
+        versions.len()
+    );
+    assert!(
+        versions[0].version >= versions[1].version,
+        "列表没按版本排：{:?}",
+        versions
+            .iter()
+            .take(3)
+            .map(|v| &v.version)
+            .collect::<Vec<_>>()
+    );
+
+    let installed = loader::install(&installer, &api, LoaderKind::Forge, &game, &chosen, None)
+        .await
+        .unwrap();
+    println!(
+        "installed: id={} main={} java={} downloaded={} failed={:?}",
+        installed.id,
+        installed.main_class,
+        installed.java_major,
+        installed.download.downloaded,
+        installed.download.failed
+    );
+    assert_eq!(installed.download.failed, Vec::<String>::new());
+    assert_eq!(
+        installed.main_class, "cpw.mods.modlauncher.Launcher",
+        "1.13–1.16 用 ModLauncher，1.17+ 才换成 BootstrapLauncher"
+    );
+    // 1.16.5 的版本 JSON 没有 javaVersion 字段 → 按 Java 8（不是"随便哪个"）
+    assert_eq!(installed.java_major, 8);
+
+    let fssep = std::path::MAIN_SEPARATOR_STR;
+    let lib = |rel: &str| paths.libraries().join(rel.replace('/', fssep));
+    // {PATCHED}：binarypatcher 的产物
+    let patched = lib(&format!(
+        "net/minecraftforge/forge/{chosen}/forge-{chosen}-client.jar"
+    ));
+    assert!(
+        patched.is_file(),
+        "binarypatcher 的产物不存在：{}",
+        patched.display()
+    );
+    // jarsplitter 与 SpecialSource 的中间产物，名字里带 neoform 风格的时间戳，按关键字认
+    let produced = live::walkdir_names(&lib("net/minecraft/client"));
+    println!("minecraft client artifacts: {produced:?}");
+    for expect in ["slim", "srg", "extra"] {
+        assert!(
+            produced.iter().any(|n| n.contains(expect)),
+            "缺少 {expect} 产物：{produced:?}"
+        );
+    }
+    // MCP_DATA 从 mcp_config 的 zip 里取出 mappings.txt（内联坐标那条路）
+    let mappings = live::walkdir_names(&lib("de/oceanlabs/mcp"));
+    assert!(
+        mappings.iter().any(|n| n.ends_with("mappings.txt")),
+        "MCP_DATA 没产出 mappings：{mappings:?}"
+    );
+    // **这一套独有的组合**：空 URL 的 universal jar 只能来自 installer 的 maven/ 树，
+    // 而 processor 又必须跑。现代版靠 processor 产出、legacy 版没有 processor，
+    // 所以只有这里能验到"两条路同时走通"。
+    let universal = lib(&format!(
+        "net/minecraftforge/forge/{chosen}/forge-{chosen}.jar"
+    ));
+    assert!(
+        universal.is_file(),
+        "空 URL 的库没从 installer 的 maven/ 树里取出来：{}",
+        universal.display()
+    );
+    assert!(
+        std::fs::metadata(&universal).unwrap().len() > 100_000,
+        "universal jar 太小，像是取错了文件"
+    );
+    let extracted = live::walkdir_names(&paths.cache().join("forge-extract"));
+    assert!(
+        extracted.iter().any(|n| n.ends_with(".lzma")),
+        "BINPATCH 没被解出来：{extracted:?}"
+    );
+
+    let merged = compass_lib::runner::read_installed_version(&paths, &installed.id).unwrap();
+    assert_eq!(merged.inherits_from.as_deref(), Some(game.as_str()));
+    assert!(
+        compass_lib::version::loader_provides_game_jar(&merged),
+        "1.16.5 有 --launchTarget，不该由我们放原版 jar"
+    );
+    let joined = merged
+        .arguments
+        .as_ref()
+        .map(|a| {
+            a.game
+                .iter()
+                .map(|x| format!("{x:?}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .unwrap_or_default();
+    assert!(joined.contains("fmlclient"), "游戏参数：{joined}");
+
+    let plan = build_plan(&paths, &installed.id, "forge-mid");
+    let entries = classpath(&plan);
+    // 不写"至少多少条"这种阈值：1.21.4 是 120 条、1.16.5 是 49 条、1.12.2 是 51 条，
+    // 阈值只能证明"差不多"。改成与生产代码同一个解析器算出的**精确集合**比对。
+    let (expected, _) = compass_lib::install::split_libraries(&merged, &OsInfo::current(), &paths)
+        .expect("库列表可解析");
+    let expected: Vec<String> = expected
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    println!(
+        "mid-era classpath: {} entries (resolver says {})",
+        entries.len(),
+        expected.len()
+    );
+    assert_eq!(
+        entries, expected,
+        "启动计划里的 classpath 与库解析器算出的不一致"
+    );
+    for e in &entries {
+        assert!(PathBuf::from(e).is_file(), "classpath entry missing: {e}");
+        assert!(
+            !e.ends_with(&format!("{game}.jar")),
+            "原版 jar 不该在 classpath 上：{e}"
+        );
+    }
+    // 补丁 jar **不在** classpath 上——这与 1.21.4 相反，而与 NeoForge 相同。
+    // 三代实测（version.json 里列了哪些 `net.minecraftforge:forge:*`）：
+    //   NeoForge 21.4 : 一个都不列 → 补丁 jar 不在 classpath，fml 按坐标找
+    //   Forge 1.21.4  : `:universal` + `:client`（后者 url 为空 = processor 产物）→ 都在
+    //   Forge 1.16.5  : 只有无 classifier 的 `forge:<ver>`（url 为空 = installer 的 maven/ 树），
+    //                   而 `{PATCHED}` 是 `:client`，**没被列进 version.json** → 不在 classpath
+    // 规则从头到尾只有一条：version.json 列什么就放什么。上面那条精确相等的断言已经
+    // 证明了它，这里只把"1.16.5 与 1.21.4 相反"钉住，防止有人照现代版的直觉改回去。
+    assert!(
+        entries
+            .iter()
+            .any(|e| e.contains(&format!("forge-{chosen}.jar"))),
+        "无 classifier 的 forge 核心 jar（来自 installer 的 maven/ 树）必须在 classpath 上"
+    );
+    assert!(
+        !entries
+            .iter()
+            .any(|e| e.contains(&format!("forge-{chosen}-client.jar"))),
+        "1.16.5 的 version.json 没列 :client，它就不该在 classpath 上"
+    );
+    let lt = plan
+        .args
+        .iter()
+        .position(|a| a == "--launchTarget")
+        .expect("--launchTarget 必须在");
+    assert_eq!(plan.args[lt + 1], "fmlclient");
+    println!(
+        "mid-era forge live install ok ({} cp entries)",
+        entries.len()
+    );
+}
+
+/// 装 v0 格式的 Forge（1.8.9）：版本 JSON 内联在 profile 里、没有 processor、
+/// universal jar 只能从 installer 根部取（Maven 上那个坐标是 404）、
+/// 库还是旧式 `url` + `clientreq`/`serverreq`。
+///
+/// 这是第四套格式，与前三套都不重叠：现代版靠 processor 产补丁、中代版靠
+/// `maven/` 树 + processor、1.12.2 靠 `maven/` 树且无 processor，
+/// 而 v0 的 universal 既不在 `maven/` 下也不在 Maven 上。
+#[tokio::test]
+#[ignore = "needs network and ~1GB of downloads (1.8.9 assets)"]
+async fn installs_v0_forge_for_real() {
+    let game = live::env_or("COMPASS_FORGE_V0_GAME", "1.8.9");
+    let data = live::data_dir("COMPASS_FORGE_V0_DIR");
+    let paths = Paths::new(data.path().to_path_buf());
+    paths.ensure().unwrap();
+    let http = live::http();
+    let api = live::api(&http);
+    let installer = live::installer(&paths, &http);
+
+    let versions = loader::versions(&api, LoaderKind::Forge, &game)
+        .await
+        .unwrap();
+    assert!(!versions.is_empty(), "没列出任何 {game} 的 Forge 版本");
+    let chosen = live::env_or("COMPASS_FORGE_V0_VERSION", &versions[0].version);
+    println!(
+        "v0 forge for {game}: {} versions (chosen {chosen})",
+        versions.len()
+    );
+
+    let installed = loader::install(&installer, &api, LoaderKind::Forge, &game, &chosen, None)
+        .await
+        .unwrap();
+    println!(
+        "installed: id={} main={} java={} downloaded={} failed={:?}",
+        installed.id,
+        installed.main_class,
+        installed.java_major,
+        installed.download.downloaded,
+        installed.download.failed
+    );
+    assert_eq!(installed.download.failed, Vec::<String>::new());
+    assert_eq!(installed.main_class, "net.minecraft.launchwrapper.Launch");
+    assert_eq!(
+        installed.java_major, 8,
+        "1.8.9 没有 javaVersion 字段 → Java 8"
+    );
+    // v0 的 id 形状与后面几代不同（`1.8.9-forge1.8.9-11.15.1.2318-1.8.9`），
+    // 所以只断言它是从内联 versionInfo 来的，不自己拼
+    assert!(
+        installed.id.starts_with(&format!("{game}-forge")),
+        "{}",
+        installed.id
+    );
+
+    // universal jar 必须在 Maven 落点上——那个坐标在 maven.minecraftforge.net 是 404，
+    // 只能从 installer 根部拷过来。少了这一步，启动就是 ClassNotFoundException。
+    let fssep = std::path::MAIN_SEPARATOR_STR;
+    let universal = paths
+        .libraries()
+        .join(format!("net/minecraftforge/forge/{chosen}/forge-{chosen}.jar").replace('/', fssep));
+    assert!(
+        universal.is_file(),
+        "v0 的 universal jar 没被拷到 Maven 落点：{}",
+        universal.display()
+    );
+    assert!(
+        std::fs::metadata(&universal).unwrap().len() > 1_000_000,
+        "universal jar 太小，像是拷错了文件"
+    );
+    // v0 的 universal 在 installer 根部，不在 maven/ 下，所以 forge-extract 是空的
+    assert!(
+        !paths.cache().join("forge-extract").exists()
+            || live::walkdir_names(&paths.cache().join("forge-extract")).is_empty(),
+        "v0 没有 BINPATCH，不该有解压产物"
+    );
+
+    let merged = compass_lib::runner::read_installed_version(&paths, &installed.id).unwrap();
+    assert_eq!(merged.inherits_from.as_deref(), Some(game.as_str()));
+    assert!(
+        !compass_lib::version::loader_provides_game_jar(&merged),
+        "launchwrapper 要原版 jar 在 classpath 上"
+    );
+    let args = merged
+        .minecraft_arguments
+        .as_deref()
+        .expect("v0 用 minecraftArguments");
+    assert!(
+        args.contains("--tweakClass") && args.contains("FMLTweaker"),
+        "{args}"
+    );
+
+    let plan = build_plan(&paths, &installed.id, "forge-v0");
+    let entries = classpath(&plan);
+    let (expected, _) = compass_lib::install::split_libraries(&merged, &OsInfo::current(), &paths)
+        .expect("库列表可解析");
+    let expected: Vec<String> = expected
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    let without_vanilla: Vec<String> = entries
+        .iter()
+        .filter(|e| !e.ends_with(&format!("{game}.jar")))
+        .cloned()
+        .collect();
+    println!(
+        "v0 classpath: {} entries (resolver says {} + 原版 jar)",
+        entries.len(),
+        expected.len()
+    );
+    assert_eq!(
+        without_vanilla, expected,
+        "classpath 与库解析器算出的不一致"
+    );
+    assert_eq!(entries.len(), expected.len() + 1, "只该多出原版 jar 这一条");
+    for e in &entries {
+        assert!(PathBuf::from(e).is_file(), "classpath entry missing: {e}");
+    }
+    assert!(
+        entries.iter().any(|e| e.contains("launchwrapper")),
+        "launchwrapper 只写了 serverreq=true，客户端仍然需要它"
+    );
+    // jline 是 clientreq=false：旧式库没有 rules，只有这两个布尔表态
+    assert!(
+        !entries.iter().any(|e| e.contains("jline")),
+        "server-only 的库不该在客户端 classpath 上：{entries:?}"
+    );
+    assert!(
+        plan.args.iter().any(|a| a == "--tweakClass"),
+        "minecraftArguments 没被展开：{:?}",
+        plan.args
+    );
+    println!("v0 forge live install ok ({} cp entries)", entries.len());
 }
 
 fn build_plan(paths: &Paths, version_id: &str, slug: &str) -> compass_lib::launch::LaunchPlan {

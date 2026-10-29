@@ -32,9 +32,12 @@ use crate::version::{self, Library, VersionJson};
 pub struct InstallProfile {
     #[serde(default)]
     pub spec: i32,
-    /// 子版本 JSON 在 installer jar 里的路径（实测 `/version.json`，带前导斜杠）
+    /// 子版本 JSON 在 installer jar 里的路径（实测 `/version.json`）。
+    /// **v0（Forge ≤1.8.9）没有这个字段**：版本 JSON 内联在 `version_info` 里。
+    #[serde(default)]
     pub json: String,
-    /// 目标游戏版本
+    /// 目标游戏版本。v0 从 `install.minecraft` 取，所以这里也可以是空的。
+    #[serde(default)]
     pub minecraft: String,
     #[serde(default)]
     pub data: HashMap<String, SideValue>,
@@ -42,9 +45,55 @@ pub struct InstallProfile {
     pub processors: Vec<Processor>,
     #[serde(default)]
     pub libraries: Vec<Library>,
-    /// 服务端 jar 的落点（客户端安装用不到，但字段存在）
+    /// 服务端 jar 的落点（客户端安装用不到，这个字段可以不在）
     #[serde(default)]
     pub server_jar_path: String,
+    /// v0：内联的子版本 JSON。1.7.10 / 1.8.9 的 installer 里**没有** `/version.json`
+    /// 条目，整个版本 JSON 就写在这里。
+    #[serde(default)]
+    pub version_info: Option<VersionJson>,
+    /// v0：universal jar 的位置。
+    #[serde(default)]
+    pub install: Option<LegacyInstall>,
+}
+
+/// v0（Forge ≤1.8.9）profile 的 `install` 段。
+///
+/// 这一代的 universal jar 既不在 Maven 上、也不在 installer 的 `maven/` 树里：
+/// 实测 `net/minecraftforge/forge/<v>/forge-<v>.jar` 是 **404**（只有 `-universal.jar`
+/// 与 `-installer.jar` 发布了），而版本 JSON 里那条库恰恰指向没有 classifier 的坐标。
+/// 所以必须像官方 installer 那样，把 `file_path`（installer 根部的
+/// `forge-<v>-universal.jar`）拷到 `path` 对应的 Maven 落点。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LegacyInstall {
+    #[serde(default)]
+    pub minecraft: String,
+    /// universal jar 的 Maven 坐标（落点由它算）
+    #[serde(default)]
+    pub path: String,
+    /// universal jar 在 installer 内部的条目名
+    #[serde(default)]
+    pub file_path: String,
+    #[serde(default)]
+    pub target: String,
+    #[serde(default)]
+    pub profile_name: String,
+}
+
+impl InstallProfile {
+    /// 目标游戏版本：新格式在顶层 `minecraft`，v0 在 `install.minecraft`。
+    /// 两处都没有就是 profile 不完整——调用方会拿到 None 并报错，而不是
+    /// 拿着空字符串去装一个"版本号为空"的东西。
+    pub fn game_version(&self) -> Option<&str> {
+        if !self.minecraft.trim().is_empty() {
+            return Some(self.minecraft.as_str());
+        }
+        self.install
+            .as_ref()
+            .map(|i| i.minecraft.as_str())
+            .filter(|s| !s.trim().is_empty())
+    }
 }
 
 /// 一个 data 变量的两侧取值。
@@ -373,6 +422,44 @@ pub fn extract_installer_maven(jar: &Path, libraries: &Path) -> Result<usize, Er
     Ok(count)
 }
 
+/// v0（Forge ≤1.8.9）：把 installer 根部的 universal jar 拷到它的 Maven 落点。
+///
+/// 这一代的版本 JSON 里那条 forge 库**下载不到**：实测
+/// `net/minecraftforge/forge/1.8.9-11.15.1.2318-1.8.9/forge-1.8.9-11.15.1.2318-1.8.9.jar`
+/// 是 404（Maven 上只发布了 `-universal.jar` 与 `-installer.jar`），
+/// 而库条目的 `url` 又确实指向 maven.minecraftforge.net。官方 installer 的做法就是
+/// 把 `install.filePath` 拷到 `install.path` 对应的位置，我们做同一件事。
+///
+/// 返回落点路径；profile 不是 v0（没有 `install` 段）时返回 None。
+pub fn extract_legacy_universal(
+    jar: &Path,
+    profile: &InstallProfile,
+    paths: &Paths,
+) -> Result<Option<PathBuf>, Error> {
+    let Some(legacy) = &profile.install else {
+        return Ok(None);
+    };
+    if legacy.file_path.trim().is_empty() || legacy.path.trim().is_empty() {
+        // v0 的 profile 缺了这两项就没法装；说清是哪一项，比留到下载阶段报 404 有用
+        return Err(Error::Config(format!(
+            "install profile's `install` section is incomplete (filePath={:?}, path={:?})",
+            legacy.file_path, legacy.path
+        )));
+    }
+    let dest = library_path(paths, &legacy.path)?;
+    if dest.is_file() {
+        return Ok(Some(dest));
+    }
+    let entry = legacy.file_path.trim_start_matches('/');
+    extract_entry(jar, entry, &dest).map_err(|_| {
+        Error::Config(format!(
+            "{} has no {entry:?} (install_profile.json 说 universal jar 在这儿)",
+            jar.display()
+        ))
+    })?;
+    Ok(Some(dest))
+}
+
 /// 内建变量 + data 变量。键名取自实测的 processor 参数。
 ///
 /// 纯函数：不读文件、不解压。`extracted` 由 `extract_data_entries` 先算好。
@@ -545,6 +632,23 @@ pub fn read_installer(jar: &Path) -> Result<(InstallProfile, VersionJson), Error
     })?;
     let profile: InstallProfile = serde_json::from_str(&text)
         .map_err(|e| Error::Config(format!("install_profile.json is not readable: {e}")))?;
+    // v0（Forge ≤1.8.9）：installer 里没有独立的版本 JSON 条目，它内联在 profile 里
+    if let Some(inline) = profile.version_info.clone() {
+        if inline.id.trim().is_empty() {
+            return Err(Error::Config(format!(
+                "{} carries an inline versionInfo without an id",
+                jar.display()
+            )));
+        }
+        return Ok((profile, inline));
+    }
+    if profile.json.trim().is_empty() {
+        return Err(Error::Invalid(format!(
+            "{} has neither an inline versionInfo nor a `json` entry path \
+             (既不是 v0 也不是 v1 的 install_profile.json)",
+            jar.display()
+        )));
+    }
     let entry = profile.json.trim_start_matches('/');
     let child_text = archive::read_text_entry(jar, entry)?.ok_or_else(|| {
         Error::Invalid(format!(
@@ -1030,18 +1134,28 @@ mod tests {
         }
     }
 
-    // ---- Forge：三份真 installer 里的原文（未裁剪）----
+    // ---- Forge：五份真 installer 里的原文（未裁剪）----
     //
-    // 选这三个版本是因为它们**分属三套格式**，实现里走三条不同路径：
+    // 选这五个版本是因为它们**分属四套格式**，实现里走四条不同路径：
     // - `1.21.4-54.1.22`：spec 1、7 个 processor（client 侧 3 个）、5 个带 outputs、
     //   主类 `net.minecraftforge.bootstrap.ForgeBootstrap`、`--launchTarget forge_client`
     // - `1.16.5-36.2.39`：spec 0、4 个 processor（都没有 sides = client 全跑）、
     //   参数里有内联 Maven 坐标、工具是 SpecialSource、主类 `cpw.mods.modlauncher.Launcher`
     // - `1.12.2-14.23.5.2864`：spec 0、**processors 是空数组**、data 也是空的、
     //   版本 JSON 用旧式 `minecraftArguments` + `--tweakClass`、主类 `launchwrapper.Launch`
+    // - `1.8.9` / `1.7.10`：**v0 格式**——install_profile.json 只有 `install` 与
+    //   `versionInfo` 两个键，版本 JSON **内联**（installer 里没有 `/version.json` 条目），
+    //   universal jar 在 installer 根部且它那条库在 Maven 上是 404，库还用旧式
+    //   `url` + `clientreq`/`serverreq`（没有 `rules`、没有 `downloads`）
     //
-    // NeoForge 只覆盖了第一套的一半（它一个 outputs 都没有），所以这三份不是冗余样本。
-    const FORGE_VERSIONS: [&str; 3] = ["1.21.4-54.1.22", "1.16.5-36.2.39", "1.12.2-14.23.5.2864"];
+    // NeoForge 只覆盖了第一套的一半（它一个 outputs 都没有），所以这五份不是冗余样本。
+    const FORGE_VERSIONS: [&str; 5] = [
+        "1.21.4-54.1.22",
+        "1.16.5-36.2.39",
+        "1.12.2-14.23.5.2864",
+        "1.8.9-11.15.1.2318-1.8.9",
+        "1.7.10-10.13.4.1614-1.7.10",
+    ];
 
     fn forge_profile(v: &str) -> InstallProfile {
         let text = match v {
@@ -1051,6 +1165,16 @@ mod tests {
             "1.16.5-36.2.39" => {
                 include_str!("../tests/fixtures/forge-1.16.5-36.2.39-install_profile.json")
             }
+            "1.8.9-11.15.1.2318-1.8.9" => {
+                include_str!(
+                    "../tests/fixtures/forge-1.8.9-11.15.1.2318-1.8.9-install_profile.json"
+                )
+            }
+            "1.7.10-10.13.4.1614-1.7.10" => {
+                include_str!(
+                    "../tests/fixtures/forge-1.7.10-10.13.4.1614-1.7.10-install_profile.json"
+                )
+            }
             _ => include_str!("../tests/fixtures/forge-1.12.2-14.23.5.2864-install_profile.json"),
         };
         serde_json::from_str(text)
@@ -1058,6 +1182,11 @@ mod tests {
     }
 
     fn forge_version(v: &str) -> VersionJson {
+        let profile = forge_profile(v);
+        // v0 的版本 JSON 是内联的，installer 里没有独立条目
+        if let Some(inline) = profile.version_info {
+            return inline;
+        }
         let text = match v {
             "1.21.4-54.1.22" => include_str!("../tests/fixtures/forge-1.21.4-54.1.22-version.json"),
             "1.16.5-36.2.39" => include_str!("../tests/fixtures/forge-1.16.5-36.2.39-version.json"),
@@ -1215,6 +1344,197 @@ mod tests {
                 .iter()
                 .any(|l| l.name == "net.minecraftforge:forge:1.12.2-14.23.5.2864")
         );
+    }
+
+    #[test]
+    fn v0_profiles_carry_the_version_json_inline() {
+        // Forge ≤1.8.9 是第四套格式：install_profile.json 只有 `install` 与 `versionInfo`
+        // 两个键，installer 里**没有** `/version.json` 条目。按新格式去读那个条目，
+        // 报出来的是"installer 里没有 version.json"——一句让人以为文件下坏了的话。
+        for v in ["1.8.9-11.15.1.2318-1.8.9", "1.7.10-10.13.4.1614-1.7.10"] {
+            let p = forge_profile(v);
+            assert!(p.json.is_empty(), "{v}: v0 没有 json 字段");
+            assert!(p.minecraft.is_empty(), "{v}: v0 顶层没有 minecraft");
+            assert!(p.processors.is_empty(), "{v}: v0 没有 processor");
+            assert!(p.data.is_empty(), "{v}: v0 没有 data");
+            assert!(p.libraries.is_empty(), "{v}: v0 的库都在 versionInfo 里");
+            assert_eq!(p.spec, 0);
+
+            // 游戏版本在 install.minecraft
+            let legacy = p.install.as_ref().expect("v0 必须有 install 段");
+            assert!(!legacy.minecraft.is_empty(), "{v}");
+            assert_eq!(p.game_version(), Some(legacy.minecraft.as_str()));
+            // universal jar 的坐标与它在 installer 里的条目名
+            assert!(
+                legacy.path.starts_with("net.minecraftforge:forge:"),
+                "{v}: {:?}",
+                legacy.path
+            );
+            assert!(
+                legacy.file_path.ends_with("-universal.jar"),
+                "{v}: {:?}",
+                legacy.file_path
+            );
+            assert!(
+                !legacy.file_path.contains('/'),
+                "{v}: universal jar 就在 installer 根部，不在 maven/ 下：{:?}",
+                legacy.file_path
+            );
+
+            // 内联的版本 JSON 就是子版本：旧式 minecraftArguments + launchwrapper
+            let inline = p.version_info.as_ref().expect("v0 必须有 versionInfo");
+            assert!(!inline.id.trim().is_empty(), "{v}");
+            assert_eq!(
+                inline.inherits_from.as_deref(),
+                Some(legacy.minecraft.as_str())
+            );
+            assert_eq!(
+                inline.main_class.as_deref(),
+                Some("net.minecraft.launchwrapper.Launch")
+            );
+            let args = inline
+                .minecraft_arguments
+                .as_deref()
+                .expect("v0 用 minecraftArguments");
+            assert!(args.contains("--tweakClass"), "{v}: {args}");
+            assert!(
+                args.contains("FMLTweaker"),
+                "{v}: 1.7.10 是 cpw.mods.fml、1.8.9 是 net.minecraftforge.fml，但都叫 FMLTweaker：{args}"
+            );
+            assert!(
+                !crate::version::loader_provides_game_jar(inline),
+                "{v}: launchwrapper 要原版 jar 在 classpath 上"
+            );
+            // 库是旧式形状：有 url、没有 downloads、用 clientreq/serverreq 而不是 rules
+            assert!(!inline.libraries.is_empty(), "{v}");
+            assert!(
+                inline.libraries.iter().all(|l| l.downloads.is_none()),
+                "{v}: v0 的库不该有 downloads 块"
+            );
+            // server-only 的库（1.8.9 的 jline）由
+            // `server_only_legacy_libraries_stay_off_the_client_classpath` 单独钉：
+            // 1.7.10 实测**没有** clientreq=false 的库，放在这个循环里就是
+            // 把 1.8.9 的偶然当成两代共有的契约。
+            // 1.7.10 的 tweakClass 包名与 1.8.9 不同（cpw.mods → net.minecraftforge），
+            // 这一条是"别把两代当成同一代"的哨兵
+            if v.starts_with("1.7.10") {
+                assert!(args.contains("cpw.mods.fml"), "{args}");
+            } else {
+                assert!(args.contains("net.minecraftforge.fml"), "{args}");
+            }
+        }
+
+        // 新格式的 game_version 仍然取顶层 minecraft
+        assert_eq!(
+            forge_profile("1.21.4-54.1.22").game_version(),
+            Some("1.21.4")
+        );
+    }
+
+    #[test]
+    fn server_only_legacy_libraries_stay_off_the_client_classpath() {
+        // v0 的库没有 rules，用 clientreq/serverreq 表态。1.8.9 实测：jline 是
+        // `serverreq=true, clientreq=false`，而 launchwrapper 只写 `serverreq=true`
+        // （clientreq 缺省 = 客户端也要）。所以只有**显式 false** 才排除。
+        let v = forge_version("1.8.9-11.15.1.2318-1.8.9");
+        let os = crate::version::OsInfo::current();
+        let resolved = crate::version::resolve_libraries(&v, &os, &crate::version::Features::new());
+        let paths: Vec<String> = resolved.iter().map(|l| l.path.replace('\\', "/")).collect();
+        assert!(
+            paths.iter().any(|p| p.contains("launchwrapper")),
+            "launchwrapper 只写了 serverreq=true，客户端仍然需要它：{paths:?}"
+        );
+        assert!(
+            !paths.iter().any(|p| p.contains("/jline/")),
+            "jline 是 clientreq=false，不该出现在客户端 classpath 上：{paths:?}"
+        );
+        // 其余的库都该在（19 条里去掉 jline 这一条 server-only 的）
+        assert_eq!(
+            resolved.len(),
+            v.libraries.len() - 1,
+            "解析出的库数与版本 JSON 对不上：{}",
+            resolved.len()
+        );
+    }
+
+    #[test]
+    fn legacy_universal_jar_is_copied_to_its_maven_path() {
+        // v0 的那条 forge 库**下载不到**：实测 Maven 上
+        // `net/minecraftforge/forge/1.8.9-…/forge-1.8.9-….jar` 是 404
+        // （只有 `-universal.jar` 与 `-installer.jar` 发布了），而版本 JSON 恰恰
+        // 指向没有 classifier 的坐标。官方 installer 的做法是把根部的 universal
+        // 拷到那个落点，我们必须做同一件事，否则装完启动就是 CNFE。
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("installer-src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(
+            src.join("forge-1.8.9-x-universal.jar"),
+            b"universal-payload",
+        )
+        .unwrap();
+        let jar = dir.path().join("forge-1.8.9-x-installer.jar");
+        crate::archive::zip_dir(&src, &jar, &[]).unwrap();
+
+        let paths = Paths::new(dir.path().join("data"));
+        paths.ensure().unwrap();
+        let profile = InstallProfile {
+            install: Some(LegacyInstall {
+                minecraft: "1.8.9".into(),
+                path: "net.minecraftforge:forge:1.8.9-x".into(),
+                file_path: "forge-1.8.9-x-universal.jar".into(),
+                target: String::new(),
+                profile_name: String::new(),
+            }),
+            ..forge_profile("1.8.9-11.15.1.2318-1.8.9")
+        };
+
+        let dest = extract_legacy_universal(&jar, &profile, &paths)
+            .unwrap()
+            .expect("v0 profile 应当给出落点");
+        let expected = paths.libraries().join(
+            [
+                "net",
+                "minecraftforge",
+                "forge",
+                "1.8.9-x",
+                "forge-1.8.9-x.jar",
+            ]
+            .join(std::path::MAIN_SEPARATOR_STR),
+        );
+        assert_eq!(dest, expected, "{}", dest.display());
+        assert_eq!(std::fs::read(&dest).unwrap(), b"universal-payload");
+
+        // 幂等：已经在位就不该重写（重装时 processor 或别的步骤可能已经放过东西）
+        std::fs::write(&dest, b"keep-me").unwrap();
+        extract_legacy_universal(&jar, &profile, &paths).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"keep-me");
+
+        // 新格式没有 install 段 → 返回 None，什么也不做
+        let modern = forge_profile("1.21.4-54.1.22");
+        assert!(modern.install.is_none());
+        assert_eq!(
+            extract_legacy_universal(&jar, &modern, &paths).unwrap(),
+            None
+        );
+
+        // installer 里没有那个条目时要说清是哪个文件缺了什么，
+        // 而不是留到启动时报 ClassNotFoundException。
+        // 注意坐标要换一个：上面幂等那步已经在 1.8.9-x 的落点放了文件，
+        // 用同一个坐标会被"已在位就跳过"短路，什么也验不到。
+        let broken = InstallProfile {
+            install: Some(LegacyInstall {
+                minecraft: "1.8.9".into(),
+                path: "net.minecraftforge:forge:9.9.9-missing".into(),
+                file_path: "not-in-here.jar".into(),
+                target: String::new(),
+                profile_name: String::new(),
+            }),
+            ..profile.clone()
+        };
+        let err = extract_legacy_universal(&jar, &broken, &paths)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not-in-here.jar"), "{err}");
     }
 
     #[test]
