@@ -204,8 +204,34 @@ impl Downloader {
                             last_err = e;
                             continue;
                         }
-                        tokio::fs::rename(&part, &task.dest).await?;
-                        return Ok(bytes);
+                        match tokio::fs::rename(&part, &task.dest).await {
+                            Ok(()) => {
+                                // **改名之后还要再校验一次**。共用 .part 的窗口里，
+                                // 另一方可能在我们校验通过之后、改名之前把它截断重写，
+                                // 于是 dest 落地的是半截内容——而它已经"校验通过"了。
+                                // 这种坏文件会被当成已下载，症状推迟到启动时变成
+                                // 一句看不出来源的 ClassNotFoundException / zip 损坏。
+                                if let Err(e) = verify(&task.dest, task).await {
+                                    let _ = tokio::fs::remove_file(&task.dest).await;
+                                    let _ = tokio::fs::remove_file(&part).await;
+                                    last_err = e;
+                                    continue;
+                                }
+                                return Ok(bytes);
+                            }
+                            // `.part` 的名字是按 dest 定的（断点续装要靠它稳定），
+                            // 所以两个安装同时下同一个库时会共用一个 .part：
+                            // 一方改名成功后，另一方的 rename 就 ENOENT。
+                            // 这时 dest 已经在了——校验通过就是成功，不是失败。
+                            // （CI 上三平台里两个平台就是这么红的，而本地串行跑永远碰不到。）
+                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                                if Self::is_complete(task).await {
+                                    return Ok(0);
+                                }
+                                last_err = Error::Io(e);
+                            }
+                            Err(e) => return Err(Error::Io(e)),
+                        }
                     }
                     // 网络类错误保留 .part 以便下次续传
                     Err(e) => last_err = e,
@@ -490,6 +516,52 @@ mod tests {
         assert_eq!(
             sha1_of_file(&p).await.unwrap(),
             "a9993e364706816aba3e25717850c26c9cd0d89d"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_present_file_with_the_wrong_checksum_is_not_treated_as_complete() {
+        // 这条钉的是"并发下载共用 .part"那个修复所**依赖的前提**：
+        // rename 撞到 ENOENT 时我们靠 is_complete 判断"另一方已经放好了"，
+        // 而那个判断只有在"哈希不符 = 不算就位"时才成立。否则半截文件会被当成成功，
+        // 一路留到启动时才炸成一句看不出来源的 ClassNotFoundException。
+        //
+        // 竞争本身没法在这里确定性复现（两个下载器要么错开、要么第二个直接跳过），
+        // 所以真正的回归信号是 CI：三个 modpack 测试并发共用一个数据目录，
+        // 就是它先在 macos 与 windows 上把这个 bug 撞出来的。
+        let body = b"the real library bytes".to_vec();
+        let srv = TestServer::start(body.clone(), 0).await;
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("lib/a.jar");
+        tokio::fs::create_dir_all(dest.parent().unwrap())
+            .await
+            .unwrap();
+        // 半截内容：大小与 sha1 都不对
+        tokio::fs::write(&dest, b"the real lib").await.unwrap();
+        let task = FileTask {
+            url: srv.url("/a.jar"),
+            dest: dest.clone(),
+            sha1: sha1_hex(&body),
+            size: body.len() as u64,
+        };
+        assert!(
+            !Downloader::is_complete(&task).await,
+            "哈希不符的文件被当成已就位"
+        );
+
+        let summary = downloader().download_all(vec![task.clone()], None).await;
+        assert_eq!(summary.failed, Vec::<String>::new());
+        assert_eq!(summary.downloaded, 1, "应当重新下载而不是跳过");
+        assert_eq!(tokio::fs::read(&dest).await.unwrap(), body);
+
+        // 只有 sha1 不符、但大小对得上的情况也要拒（size 相同内容不同的坏文件）
+        let mut same_len = body.clone();
+        same_len[0] = same_len[0].wrapping_add(1);
+        assert_eq!(same_len.len(), body.len());
+        tokio::fs::write(&dest, &same_len).await.unwrap();
+        assert!(
+            !Downloader::is_complete(&task).await,
+            "大小相同但内容不同的文件被当成已就位"
         );
     }
 
