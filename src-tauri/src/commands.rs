@@ -3,7 +3,7 @@
 //! 命令一律是**具名**的，不提供 `request(url)` 这类通用转发：通用转发等于把桌面应用
 //! 变成开放代理，也会让收紧后的 CSP 失去意义（见 api.rs 的模块注释）。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::Serialize;
@@ -14,7 +14,7 @@ use crate::account::{self, Account, AccountView, now_unix};
 use crate::api::{File as HoardFile, Project, SearchResponse, Version, png_data_url};
 use crate::archive::ZipSummary;
 use crate::config::{self, Config};
-use crate::content::{self, ContentItem, ContentStats, Kind};
+use crate::content::{self, ContentItem, ContentStats, DependencyReport, Kind};
 use crate::error::Error;
 use crate::install::{InstalledVersion, Installer};
 use crate::instance::{self, ArchiveInfo, Instance, InstanceLoader, InstanceSettings};
@@ -24,7 +24,7 @@ use crate::loader::{self, LoaderKind, LoaderVersion};
 use crate::meta::{ManifestEntry, MetaClient};
 use crate::modpack::{self, ModpackInfo, ModpackInstall};
 use crate::net::{self, Downloader};
-use crate::paths::PathsInfo;
+use crate::paths::{Paths, PathsInfo};
 use crate::runner;
 use crate::state::{AppState, CopyProgress, GameExit, RunningGame};
 
@@ -252,7 +252,60 @@ pub async fn hoard_install(
             summary.failed.join("; ")
         )));
     }
-    content::item_for(&game, kind, &dest, true)
+    let item = content::item_for(&game, kind, &dest, true)?;
+    // W11 的冲突闸门。**下载之后**才查：依赖与冲突写在 jar 里的元数据中，
+    // 下下来是唯一能读到的办法。命中无条件冲突就把文件删掉再报错——
+    // 留在目录里等于"我们拦下了它，但它还在"，下次启动照样炸。
+    // 缺依赖与带版本约束的冲突不在这里拦，由 content_check 汇总给 UI。
+    if kind == Kind::Mods {
+        reject_conflicts(
+            &state.paths,
+            &game,
+            &slug,
+            std::slice::from_ref(&file.filename),
+        )?;
+    }
+    Ok(item)
+}
+
+/// 冲突闸门：把刚落盘的 mod 与实例里已装的比一遍，命中**无条件**不兼容就删掉并报错。
+///
+/// 只拦无条件的那一类：带版本区间的我们不判定（四家语法各不相同，自己写求值器
+/// 判错的后果比明说"不判定"更糟），那类只进 `content_check` 的报告。
+fn reject_conflicts(
+    paths: &Paths,
+    game: &Path,
+    slug: &str,
+    file_names: &[String],
+) -> Result<(), Error> {
+    if file_names.is_empty() {
+        return Ok(());
+    }
+    let loader = instance::load(paths, slug)
+        .ok()
+        .and_then(|i| i.loader.map(|l| l.kind));
+    let mods_dir = content::ensure_dir(game, Kind::Mods)?;
+    for name in file_names {
+        let Some(meta) = content::read_mod_meta(&mods_dir.join(name)) else {
+            continue;
+        };
+        let report = content::check_file(game, name, &meta, loader);
+        if !report.blocks() {
+            continue;
+        }
+        let _ = content::remove(game, Kind::Mods, name);
+        let pairs: Vec<String> = report
+            .blocked
+            .iter()
+            .map(|c| format!("{} ↔ {}", c.declared_by, c.id))
+            .collect();
+        return Err(Error::Invalid(format!(
+            "refusing to keep {name}: 无条件不兼容（{}）。已装的那一方也会声明冲突，\
+             所以两个方向都查过了",
+            pairs.join(", ")
+        )));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -752,7 +805,34 @@ pub async fn content_import(
     let paths = state.paths.clone();
     tokio::task::spawn_blocking(move || {
         let game = instance::game_dir(&paths, &slug)?;
-        content::import(&game, kind, &sources)
+        let imported = content::import(&game, kind, &sources)?;
+        // 与 Hoard 安装同一条闸门：本地拖进来的 mod 也要查冲突，
+        // 否则"从浏览器下载再拖进来"就绕过了检查
+        if kind == Kind::Mods {
+            reject_conflicts(&paths, &game, &slug, &imported)?;
+        }
+        Ok(imported)
+    })
+    .await
+    .map_err(join_err)?
+}
+
+/// 整个实例的依赖体检：缺哪些必需依赖、哪些 mod 互相声明了不兼容。
+///
+/// 与安装时那道闸门互补：闸门只看"新装的这一个"，而整合包一次装几十个、
+/// 用户手动往目录里丢文件、或者禁用/启用某个 mod，都需要一次全局体检才看得出问题。
+#[tauri::command]
+pub async fn content_check(
+    state: State<'_, Arc<AppState>>,
+    slug: String,
+) -> Result<DependencyReport, Error> {
+    let paths = state.paths.clone();
+    tokio::task::spawn_blocking(move || {
+        let game = instance::game_dir(&paths, &slug)?;
+        let loader = instance::load(&paths, &slug)
+            .ok()
+            .and_then(|i| i.loader.map(|l| l.kind));
+        Ok(content::check_instance(&game, loader))
     })
     .await
     .map_err(join_err)?

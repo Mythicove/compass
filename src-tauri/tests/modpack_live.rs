@@ -104,6 +104,31 @@ async fn installs_a_real_mrpack_for_real() {
     assert_eq!(res.skipped_unsupported, 0);
     assert!(res.bytes > 10_000_000, "{}", res.bytes);
 
+    // 装完的体检：一个能正常运行的整合包不该报出任何缺失或不兼容。
+    // 这条与 real_mods 里那条同源，但走的是完整安装路径（含 loader 记录 →
+    // platform_ids 的推导），所以 fabricloader / minecraft 这些 id 也必须被认成"已提供"。
+    println!(
+        "dep check: missing={} blocked={} uncertain={}",
+        res.deps.missing.len(),
+        res.deps.blocked.len(),
+        res.deps.uncertain.len()
+    );
+    assert!(
+        res.deps.missing.is_empty(),
+        "在能正常运行的整合包上报了假缺失：{:?}",
+        res.deps.missing
+    );
+    assert!(
+        res.deps.blocked.is_empty(),
+        "在能正常运行的整合包上报了假冲突：{:?}",
+        res.deps.blocked
+    );
+    // 带版本约束的不兼容我们不求值，这个包里确实有（实测 38 条），报多少都合理
+    assert!(
+        !res.deps.uncertain.is_empty(),
+        "这个包里有带版本区间的 breaks，一条都没查出来说明解析退化了"
+    );
+
     // 落点：46 个 mod + 2 个资源包，都在游戏目录里对应的子目录
     let game = instance::game_dir(&paths, "fo-live").unwrap();
     let mods = live::walkdir_names(&game.join("mods"));

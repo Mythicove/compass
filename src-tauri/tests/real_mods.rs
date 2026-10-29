@@ -14,7 +14,31 @@
 
 use std::path::{Path, PathBuf};
 
-use compass_lib::content::{self, Kind};
+use compass_lib::content::{self, DepKind, Kind};
+
+/// 依赖的可读形式（打印用）。
+fn dep_strings(meta: &content::ModMeta) -> Vec<String> {
+    meta.deps
+        .iter()
+        .map(|d| format!("{} {} {}", d.id, d.kind.as_str(), d.constraint))
+        .collect()
+}
+
+/// 依赖的排序键，与 `content::deps_from` 用的完全一致。
+fn dep_keys(meta: &content::ModMeta) -> Vec<(String, DepKind, String)> {
+    meta.deps
+        .iter()
+        .map(|d| (d.id.clone(), d.kind, d.constraint.clone()))
+        .collect()
+}
+
+/// 找一条特定 (id, kind) 的依赖，返回它的约束原文。
+fn constraint_of(meta: &content::ModMeta, id: &str, kind: DepKind) -> Option<String> {
+    meta.deps
+        .iter()
+        .find(|d| d.id == id && d.kind == kind)
+        .map(|d| d.constraint.clone())
+}
 
 fn sample_dir() -> Option<PathBuf> {
     std::env::var("COMPASS_REAL_MODS_DIR")
@@ -48,7 +72,7 @@ fn parses_real_mod_jars() {
             meta.name,
             meta.version,
             meta.loaders,
-            meta.depends
+            dep_strings(&meta)
         );
         // 空的 id/version 意味着解析器读到了文件却拿错了字段——那比读不出来更糟，
         // 因为 UI 会显示一个空白名字而不是回落到文件名
@@ -67,61 +91,70 @@ fn parses_real_mod_jars() {
         );
         assert!(!meta.loaders.is_empty(), "{}: 没识别出加载器", name_of(jar));
 
-        // 依赖列表的不变量：排序 + 去重 + 有上限（三种元数据格式共用同一条规则）
-        let mut sorted = meta.depends.clone();
+        // 依赖列表的不变量：排序 + 去重 + 有上限（四种元数据格式共用同一条规则）。
+        // 排序键必须与 `deps_from` 用的**同一个**（id, kind, constraint 三元组）：
+        // 这里另写一份"按显示字符串排"的比较器，验的就是我那份副本而不是生产那份——
+        // kind 的声明序（required < optional < incompatible < embedded）与名字的字母序
+        // 正好不同，第一版就这么假红过一次。
+        let keys = dep_keys(&meta);
+        let mut sorted = keys.clone();
         sorted.sort();
-        assert_eq!(sorted, meta.depends, "{}: 依赖没排序", name_of(jar));
-        let mut deduped = meta.depends.clone();
+        assert_eq!(sorted, keys, "{}: 依赖没排序", name_of(jar));
+        let mut deduped = keys.clone();
         deduped.dedup();
-        assert_eq!(
-            deduped.len(),
-            meta.depends.len(),
-            "{}: 依赖有重复",
-            name_of(jar)
+        assert_eq!(deduped.len(), keys.len(), "{}: 依赖有重复", name_of(jar));
+        assert!(keys.len() <= 64, "{}: 依赖超出上限", name_of(jar));
+        println!("    deps: {:?}", dep_strings(&meta));
+        assert!(
+            meta.deps.iter().all(|d| !d.id.trim().is_empty()),
+            "{}: 有空 id 的依赖：{:?}",
+            name_of(jar),
+            meta.deps
         );
-        assert!(meta.depends.len() <= 64, "{}: 依赖超出上限", name_of(jar));
 
         // 已知样本的具体断言：值来自真 jar 里的真元数据。写成条件断言是为了换样本时
         // 不会假失败，但样本在的时候必须验到具体形状。
         match meta.id.as_str() {
             // sodium 的 fabric.mod.json 里 minecraft 的约束是**数组** ["1.21.4"]，
-            // fabricloader 是字符串 ">=0.16.0"，另有一堆 "*"（任意版本，只显示 modId）
+            // fabricloader 是字符串 ">=0.16.0"，另有一堆 "*"（任意版本）
             "sodium" => {
-                assert!(
-                    meta.depends.iter().any(|d| d == "minecraft 1.21.4"),
+                assert_eq!(
+                    constraint_of(&meta, "minecraft", DepKind::Required).as_deref(),
+                    Some("1.21.4"),
                     "数组形式的约束没解析出来：{:?}",
-                    meta.depends
+                    meta.deps
                 );
-                assert!(
-                    meta.depends.iter().any(|d| d == "fabricloader >=0.16.0"),
+                assert_eq!(
+                    constraint_of(&meta, "fabricloader", DepKind::Required).as_deref(),
+                    Some(">=0.16.0"),
                     "{:?}",
-                    meta.depends
+                    meta.deps
+                );
+                assert_eq!(
+                    constraint_of(&meta, "fabric-resource-loader-v0", DepKind::Required).as_deref(),
+                    Some("*"),
+                    "约束原文要留着（求值是另一回事，见 check_dependencies）：{:?}",
+                    meta.deps
+                );
+                // breaks 现在**应该**出现，但必须是 incompatible 而不是 required：
+                // 混进 required 会给出完全相反的建议（"缺了它"对"装了才炸"）
+                assert!(
+                    constraint_of(&meta, "optifabric", DepKind::Incompatible).is_some(),
+                    "sodium 的 breaks 没被解析成 incompatible：{:?}",
+                    meta.deps
                 );
                 assert!(
-                    meta.depends
-                        .iter()
-                        .any(|d| d == "fabric-resource-loader-v0"),
-                    "`*` 约束应当只显示 modId：{:?}",
-                    meta.depends
-                );
-                assert!(
-                    !meta.depends.iter().any(|d| d.contains('*')),
-                    "`*` 不该出现在显示里：{:?}",
-                    meta.depends
-                );
-                // breaks（冲突列表）不是依赖；混进来会给出相反的建议
-                assert!(
-                    !meta.depends.iter().any(|d| d.contains("optifabric")),
-                    "{:?}",
-                    meta.depends
+                    constraint_of(&meta, "optifabric", DepKind::Required).is_none(),
+                    "冲突项被算成了依赖：{:?}",
+                    meta.deps
                 );
             }
             // JEI 的 neoforge/forge mods.toml 把依赖挂在 [[dependencies.<modId>]] 下
             "jei" if meta.loaders.iter().any(|l| l == "neoforge" || l == "forge") => {
                 assert!(
-                    meta.depends.iter().any(|d| d.starts_with("minecraft ")),
+                    constraint_of(&meta, "minecraft", DepKind::Required).is_some(),
                     "mods.toml 的 dependencies.<modId> 表没被遍历到：{:?}",
-                    meta.depends
+                    meta.deps
                 );
             }
             // 1.12 的 mcmod.info 里 `dependencies` 常常就是空数组（真样本正是 []）。
@@ -217,6 +250,104 @@ fn name_of(p: &Path) -> String {
     p.file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| p.display().to_string())
+}
+
+/// 一整个真整合包的 mods 目录：**"缺依赖"必须一个都不报**。
+///
+/// 这是 W11 依赖检查的关键性质，也是我造不出来的样本。用的是 Fabulously Optimized
+/// 1.21.4 的 46 个 mod（`modpack_live` 装出来的那份），实测其中 **15 个依赖 id
+/// 只由嵌套 jar 提供**（fabric-api 的各子模块、sodium 内嵌的 fabric-renderer-api-v1、
+/// controlify 内嵌的 yet_another_config_lib_v3…）。少扫一层嵌套就会报 15 个假缺失，
+/// 而一个能正常运行的整合包报出任何"缺依赖"都是我们的 bug，不是包的 bug。
+///
+/// `COMPASS_REAL_MODS_DIR` 给 mods 目录本身或它的父目录（游戏目录）都可以。
+#[test]
+#[ignore = "needs a real mods directory; set COMPASS_REAL_MODS_DIR"]
+fn a_real_modpack_reports_no_false_missing_dependencies() {
+    let Some(dir) = sample_dir() else {
+        eprintln!("COMPASS_REAL_MODS_DIR not set — skipping");
+        return;
+    };
+    // scan() 要的是游戏目录（它自己拼 mods/）；给的是 mods 目录时往上退一层
+    let game = if dir.file_name().is_some_and(|n| n == "mods") {
+        dir.parent().unwrap_or(&dir).to_path_buf()
+    } else {
+        dir.clone()
+    };
+    let items = content::scan(&game, Kind::Mods);
+    let with_meta: Vec<_> = items.iter().filter(|i| i.meta.is_some()).collect();
+    println!(
+        "scanned {} items, {} with metadata",
+        items.len(),
+        with_meta.len()
+    );
+    assert!(
+        with_meta.len() >= 20,
+        "样本太小（{} 个有元数据），验不出嵌套 jar 那一层",
+        with_meta.len()
+    );
+
+    // 先确认解析器真的读到了各类依赖，否则"没有缺失"可能只是因为什么都没解析出来
+    let mut required = 0usize;
+    let mut optional = 0usize;
+    let mut incompatible = 0usize;
+    let mut embedded = 0usize;
+    for item in &with_meta {
+        for d in &item.meta.as_ref().unwrap().deps {
+            match d.kind {
+                compass_lib::content::DepKind::Required => required += 1,
+                compass_lib::content::DepKind::Optional => optional += 1,
+                compass_lib::content::DepKind::Incompatible => incompatible += 1,
+                compass_lib::content::DepKind::Embedded => embedded += 1,
+            }
+        }
+    }
+    println!(
+        "deps: required={required} optional={optional} incompatible={incompatible} embedded={embedded}"
+    );
+    assert!(required > 50, "required 只有 {required}，解析大概退化了");
+    assert!(
+        incompatible >= 20,
+        "incompatible 只有 {incompatible}：实测 21 个 jar 有 breaks、4 个有 conflicts"
+    );
+    assert!(
+        embedded >= 90,
+        "embedded 只有 {embedded}：实测这个包有 109 个嵌套 jar"
+    );
+
+    // 关键断言：把每个 mod 轮流当"待装的那个"，一个假缺失都不该出现
+    let mut missing: Vec<String> = Vec::new();
+    let mut blocked: Vec<String> = Vec::new();
+    let mut uncertain = 0usize;
+    for item in &with_meta {
+        let meta = item.meta.as_ref().unwrap();
+        let r = content::check_dependencies(
+            &items,
+            meta,
+            Some(compass_lib::loader::LoaderKind::Fabric),
+        );
+        for m in &r.missing {
+            missing.push(format!("{} 需要 {}", meta.id, m.id));
+        }
+        for b in &r.blocked {
+            blocked.push(format!("{} 与 {} 无条件冲突", meta.id, b.id));
+        }
+        uncertain += r.uncertain.len();
+    }
+    // 带版本约束的不兼容我们不求值，报多少都合理（实测这个包里确实有）
+    println!("uncertain (version-constrained, not evaluated): {uncertain}");
+    assert!(
+        missing.is_empty(),
+        "在能正常运行的整合包上报了 {} 个假缺失：\n{}",
+        missing.len(),
+        missing.join("\n")
+    );
+    assert!(
+        blocked.is_empty(),
+        "在能正常运行的整合包上报了 {} 个假冲突：\n{}",
+        blocked.len(),
+        blocked.join("\n")
+    );
 }
 
 /// 取样本的命令（Modrinth 公开 API，不需要密钥）。放在这里是为了下一次能复现：

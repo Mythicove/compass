@@ -56,15 +56,17 @@ const ALIASES: [(&str, &str); 6] = [
 ];
 
 /// 必须被比对到的形状。少了这条，某次重命名会让一个载荷悄悄从门里消失。
-const MUST_COMPARE: [&str; 28] = [
+const MUST_COMPARE: [&str; 32] = [
     "AccountView",
     "ArchiveInfo",
     "Config",
+    "Conflict",
     "ContentItem",
     "ContentListing",
     "ContentStats",
     "CopyProgress",
     "Defaults",
+    "DependencyReport",
     "Download",
     "FileProgress",
     "GameExit",
@@ -77,6 +79,8 @@ const MUST_COMPARE: [&str; 28] = [
     "LoaderVersion",
     "LogLine",
     "ManifestEntry",
+    "MissingDep",
+    "ModDep",
     "ModMeta",
     "ModpackInfo",
     "ModpackInstall",

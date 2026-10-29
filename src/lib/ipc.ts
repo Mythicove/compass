@@ -167,15 +167,56 @@ export const CONTENT_KINDS: ContentKind[] = [
   "saves",
 ];
 
+/** 依赖类型。取值与 Hoard 的 `version_dependencies.dependency_type` 一致，
+ *  也是 Modrinth 那一套——不新增第五种。 */
+export type DepKind = "required" | "optional" | "incompatible" | "embedded";
+
+export interface ModDep {
+  id: string;
+  kind: DepKind;
+  /** 版本约束**原文**（`>=0.16.0`、`<0.6.6`、`*`、`[1.21.4,1.21.5)`…）。
+   *  后端不求值它，UI 也不要装作求值过。 */
+  constraint: string;
+}
+
 /** jar 内解析出的 mod 元数据；解析不出来时为 null，UI 退回显示文件名。 */
 export interface ModMeta {
   name: string;
   id: string;
   version: string;
   loaders: string[];
-  /** 必需依赖，每项形如 `"<modId> <版本约束>"`（约束为任意版本时只有 modId）。
-   *  已排序去重；只展示，不做版本区间求值。 */
-  depends: string[];
+  /** 这个 jar 还顶替哪些 mod id（`fabric-api` 顶替 `fabric`）。依赖检查要算上它们。 */
+  provides: string[];
+  /** 全部依赖，按类型分开。已排序去重。 */
+  deps: ModDep[];
+}
+
+/** 缺一个必需依赖。 */
+export interface MissingDep {
+  id: string;
+  constraint: string;
+  /** 谁要它。用户要能看出"是 X 需要 Y"，而不只是"缺 Y"。 */
+  requiredBy: string;
+}
+
+/** 命中一条不兼容声明。 */
+export interface Conflict {
+  /** 冲突的另一方 */
+  id: string;
+  constraint: string;
+  /** 声明者（可能是已装的那个 mod，不是新装的那个） */
+  declaredBy: string;
+}
+
+/** 依赖体检结果。**不评估版本区间**：四家语法各不相同，自己写求值器判错的后果
+ *  比明说"不判定"更糟。所以只回答两个不需要求值就能确定的问题。 */
+export interface DependencyReport {
+  /** 缺的必需依赖。不阻止安装，但该让用户看见并给出去 Hoard 搜的动作。 */
+  missing: MissingDep[];
+  /** 命中的**无条件**不兼容 → 安装时会被拦下 */
+  blocked: Conflict[];
+  /** 命中了带版本约束的不兼容，而我们不求值区间 → 只提醒 */
+  uncertain: Conflict[];
 }
 
 export interface ContentItem {
@@ -295,6 +336,9 @@ export interface ModpackInstall {
   overwritten: string[];
   failed: string[];
   warnings: string[];
+  /** 装完之后对整个实例做的依赖体检。整合包一次装几十个，逐个拦既慢又不合适
+   *  （两个 mod 互相冲突不该让整包失败），所以这里只报不拦。 */
+  deps: DependencyReport;
 }
 
 export interface LaunchInfo {
@@ -432,6 +476,9 @@ export const ipc = {
     invoke<string[]>("content_import", { slug, kind, sources }),
   contentRemove: (slug: string, kind: ContentKind, fileName: string) =>
     invoke<void>("content_remove", { slug, kind, fileName }),
+  /** 整个实例的依赖体检：缺哪些必需依赖、哪些 mod 互相声明了不兼容。
+   *  安装时的闸门只看新装的那一个，整合包一次装几十个就需要这个全局视图。 */
+  contentCheck: (slug: string) => invoke<DependencyReport>("content_check", { slug }),
 
   // ---- Mod loader ----
   /** 某个游戏版本可用的 loader 版本（stable 为 null = 来源没说，别当成 dev） */

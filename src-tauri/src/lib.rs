@@ -99,6 +99,7 @@ pub fn run() {
             commands::content_set_enabled,
             commands::content_import,
             commands::content_remove,
+            commands::content_check,
             commands::loader_versions,
             commands::loader_install,
             commands::loader_remove,

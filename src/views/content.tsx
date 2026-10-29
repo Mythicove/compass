@@ -11,14 +11,26 @@ import {
   toIpcError,
   type ContentKind,
   type ContentListing,
+  type DependencyReport,
   type FileProgress,
   type HoardProject,
   type HoardVersion,
   type Instance,
+  type ModDep,
 } from "../lib/ipc";
 
 function mb(bytes: number): string {
   return (bytes / 1024 / 1024).toFixed(1);
+}
+
+/** 依赖按类型分组，用于 tooltip。
+ *  不能像以前那样拼成一条"N 项依赖"：`incompatible` 的意思与 `required` **相反**
+ *  （"装了才起不来"对"缺了就起不来"），混在一个数字里等于把警告藏起来。 */
+function depGroups(deps: ModDep[]): { kind: ModDep["kind"]; items: ModDep[] }[] {
+  const order: ModDep["kind"][] = ["required", "optional", "incompatible", "embedded"];
+  return order
+    .map((kind) => ({ kind, items: deps.filter((d) => d.kind === kind) }))
+    .filter((g) => g.items.length > 0);
 }
 
 /** 文件选择器的过滤条件。存档是文件夹（世界就是一个目录），不走扩展名过滤。 */
@@ -39,6 +51,9 @@ export function ContentView({ initialSlug }: { initialSlug?: string }) {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [dropping, setDropping] = useState(false);
+  // 依赖体检结果。null = 还没查过（不自动查：一次体检要把每个 mod 轮流当"待装的那个"，
+  // 46 个 mod 的整合包就是 46 次全量比对，不该在每次切页面时白跑）
+  const [report, setReport] = useState<DependencyReport | null>(null);
 
   const fail = useCallback(
     (e: unknown) => setError(`${t(errorKey(toIpcError(e).code))} — ${toIpcError(e).message}`),
@@ -123,8 +138,13 @@ export function ContentView({ initialSlug }: { initialSlug?: string }) {
     }
   };
 
-  const pickAndImport = () =>
-    act("import", async () => {
+  /** 依赖体检：缺哪些必需依赖、哪些 mod 互相声明了不兼容。 */
+  const runCheck = () =>
+    act("check", async () => {
+      setReport(await ipc.contentCheck(slug));
+    });
+
+  const pickAndImport = () =>    act("import", async () => {
       const filter = FILTERS[kind];
       const picked = await open(
         kind === "saves"
@@ -237,8 +257,64 @@ export function ContentView({ initialSlug }: { initialSlug?: string }) {
               </p>
             )}
             {kind !== "mods" && <p className="muted small">{t("content.enableHint")}</p>}
-            {kind === "mods" && <p className="muted small">{t("content.dependsHint")}</p>}
+            {kind === "mods" && (
+              <>
+                <p className="muted small">{t("content.dependsHint")}</p>
+                <div className="row">
+                  <button type="button" className="link" disabled={busy !== null} onClick={() => void runCheck()}>
+                    {busy === "check" ? "…" : t("content.check")}
+                  </button>
+                </div>
+              </>
+            )}
             <p className="muted small">{t("content.dropHint")}</p>
+
+            {kind === "mods" && report && (
+              <section className={report.blocked.length > 0 ? "card warn" : "card"}>
+                <h3>{t("content.checkTitle")}</h3>
+                {report.missing.length === 0 &&
+                  report.blocked.length === 0 &&
+                  report.uncertain.length === 0 && (
+                    <p className="ok small">{t("content.checkClean")}</p>
+                  )}
+                {report.blocked.length > 0 && (
+                  <ul className="small audit">
+                    {report.blocked.map((c) => (
+                      <li key={`${c.declaredBy}:${c.id}`}>
+                        {t("content.checkBlocked", { a: c.declaredBy, b: c.id })}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {report.missing.length > 0 && (
+                  <ul className="small audit">
+                    {report.missing.map((m) => (
+                      <li key={`${m.requiredBy}:${m.id}`}>
+                        {t("content.checkMissing", {
+                          by: m.requiredBy,
+                          id: m.id,
+                          constraint: m.constraint || "*",
+                        })}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {report.uncertain.length > 0 && (
+                  <ul className="small audit">
+                    {report.uncertain.map((c) => (
+                      <li key={`${c.declaredBy}:${c.id}`}>
+                        {t("content.checkUncertain", {
+                          a: c.declaredBy,
+                          b: c.id,
+                          constraint: c.constraint,
+                        })}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                <p className="muted small">{t("content.checkNote")}</p>
+              </section>
+            )}
 
             {listing && listing.items.length === 0 && <p className="muted">{t("content.empty")}</p>}
 
@@ -269,10 +345,34 @@ export function ContentView({ initialSlug }: { initialSlug?: string }) {
                       <td className="muted small">{item.meta?.version ?? "—"}</td>
                       <td className="muted small">{item.meta?.loaders.join(" + ") || "—"}</td>
                       <td className="muted small">
-                        {item.meta && item.meta.depends.length > 0 ? (
-                          // 完整清单放 title：一列里塞七八个 modId 会把表格挤变形
-                          <span title={item.meta.depends.join("\n")}>
-                            {t("content.dependsCount", { n: item.meta.depends.length })}
+                        {item.meta && item.meta.deps.length > 0 ? (
+                          // 完整清单放 title：一列里塞七八个 modId 会把表格挤变形。
+                          // 按类型分行，`incompatible` 单独标出来——它与"依赖"意思相反。
+                          <span
+                            title={depGroups(item.meta.deps)
+                              .map(
+                                (g) =>
+                                  `[${t(`content.dep.${g.kind}`)}]\n` +
+                                  g.items
+                                    .map((d) =>
+                                      d.constraint ? `  ${d.id} ${d.constraint}` : `  ${d.id}`,
+                                    )
+                                    .join("\n"),
+                              )
+                              .join("\n")}
+                          >
+                            {t("content.dependsCount", {
+                              n: item.meta.deps.filter((d) => d.kind === "required").length,
+                            })}
+                            {item.meta.deps.some((d) => d.kind === "incompatible") && (
+                              <em className="warn">
+                                {" "}
+                                · {t("content.dep.incompatible")}{" "}
+                                {
+                                  item.meta.deps.filter((d) => d.kind === "incompatible").length
+                                }
+                              </em>
+                            )}
                           </span>
                         ) : (
                           "—"

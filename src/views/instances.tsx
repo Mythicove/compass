@@ -365,6 +365,16 @@ export function InstancesView({ onOpenContent }: { onOpenContent: (slug: string)
         );
       }
       for (const w of res.warnings) bits.push(w);
+      // 体检结果只报数，细节在内容页的「检查依赖与冲突」里：
+      // 一行通知里塞几十条 mod id 没人看得完
+      if (res.deps.blocked.length + res.deps.missing.length > 0) {
+        bits.push(
+          t("instances.modpackDeps", {
+            blocked: res.deps.blocked.length,
+            missing: res.deps.missing.length,
+          }),
+        );
+      }
       setNotice(bits.join(" · "));
     });
 

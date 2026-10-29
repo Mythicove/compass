@@ -298,6 +298,12 @@ pub struct ModpackInstall {
     pub overwritten: Vec<String>,
     pub failed: Vec<String>,
     pub warnings: Vec<String>,
+    /// 装完之后对整个实例做一次依赖体检。
+    ///
+    /// 整合包一次装几十个 mod，逐个走安装时那道闸门既慢（每个文件都要重扫一遍目录）
+    /// 又不合适——两个 mod 互相冲突不该让整包安装失败。所以这里不拦，只把结果
+    /// 一起交出去：装完就知道缺什么、谁跟谁不兼容，而不是等用户想起来去点"检查"。
+    pub deps: crate::content::DependencyReport,
 }
 
 /// 装一个 `.mrpack`：建实例 → 装游戏版本与 loader → 应用 overrides → 下载 files。
@@ -401,6 +407,10 @@ pub async fn install(
         }
     };
 
+    // 装完做一次全实例体检。loader 类型要用**装完之后的**那个（可能是 None → 原版），
+    // 因为 minecraft / fabricloader 这些 id 是不是"平台已提供"取决于它
+    let deps = crate::content::check_instance(&game_dir, inst.loader.as_ref().map(|l| l.kind));
+
     Ok(ModpackInstall {
         instance: inst,
         downloaded: outcome.downloaded,
@@ -411,6 +421,7 @@ pub async fn install(
         overwritten: outcome.overwritten,
         failed: outcome.failed,
         warnings,
+        deps,
     })
 }
 
