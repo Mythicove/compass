@@ -20,6 +20,7 @@ pub mod java;
 pub mod launch;
 pub mod loader;
 pub mod meta;
+pub mod modpack;
 pub mod net;
 pub mod paths;
 pub mod runner;
@@ -91,6 +92,8 @@ pub fn run() {
             commands::instance_export,
             commands::instance_inspect_archive,
             commands::instance_import,
+            commands::modpack_inspect,
+            commands::modpack_install,
             commands::instance_java,
             commands::content_list,
             commands::content_set_enabled,

@@ -259,6 +259,44 @@ export interface ArchiveInfo {
   hadCustomJava: boolean;
 }
 
+/** 装之前对 `.mrpack` 的"看一眼"（对应 Rust 的 `modpack::ModpackInfo`）。
+ *  整合包决定我们下载什么、往游戏目录哪里写、装哪个 loader 版本，
+ *  所以这些数字与警告必须在落盘之前摊开给用户看。 */
+export interface ModpackInfo {
+  name: string;
+  /** 整合包自己的版本号（不是游戏版本），如 `8.2.0` */
+  packVersion: string;
+  summary: string | null;
+  formatVersion: number;
+  /** null = 包里没写、或写成了 `*`，这种包装不了 */
+  minecraft: string | null;
+  loader: LoaderKind | null;
+  loaderVersion: string | null;
+  filesTotal: number;
+  filesRequired: number;
+  /** 作者标为可选，我们仍然装上，但单独报出来 */
+  filesOptional: number;
+  /** `env.client = unsupported`，客户端安装会跳过 */
+  filesSkipped: number;
+  bytes: number;
+  overrideEntries: number;
+  warnings: string[];
+}
+
+/** 一次整合包安装的结果（对应 Rust 的 `modpack::ModpackInstall`）。 */
+export interface ModpackInstall {
+  instance: Instance;
+  downloaded: number;
+  bytes: number;
+  optionalInstalled: number;
+  skippedUnsupported: number;
+  overrideFiles: number;
+  /** 被整合包覆盖掉的已存在文件（相对游戏目录） */
+  overwritten: string[];
+  failed: string[];
+  warnings: string[];
+}
+
 export interface LaunchInfo {
   instance: string;
   versionId: string;
@@ -375,6 +413,11 @@ export const ipc = {
   /** slug 由调用方给，不取自压缩包 */
   instanceImport: (path: string, slug: string, name: string) =>
     invoke<Instance>("instance_import", { path, slug, name }),
+  /** 只读 `.mrpack` 里的 modrinth.index.json，不落盘；UI 据此在安装前让用户确认 */
+  modpackInspect: (path: string) => invoke<ModpackInfo>("modpack_inspect", { path }),
+  /** slug 由调用方给，不取自整合包；失败时后端会把实例目录整个删掉 */
+  modpackInstall: (path: string, slug: string, name: string) =>
+    invoke<ModpackInstall>("modpack_install", { path, slug, name }),
   /** 这个实例会用哪个 Java；null = 没找到（此时启动会失败，UI 要提前说清楚） */
   instanceJava: (slug: string) => invoke<JavaRuntime | null>("instance_java", { slug }),
 

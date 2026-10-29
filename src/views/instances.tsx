@@ -9,6 +9,7 @@ import {
   ipc,
   toIpcError,
   type ArchiveInfo,
+  type ModpackInfo,
   type CopyProgress,
   type FileProgress,
   type GameExit,
@@ -93,6 +94,10 @@ export function InstancesView({ onOpenContent }: { onOpenContent: (slug: string)
   // 导入确认：先只读压缩包里的 instance.json（不落盘），把会影响启动的内容摊开给用户看
   const [importInfo, setImportInfo] = useState<{ path: string; info: ArchiveInfo } | null>(null);
   const [importName, setImportName] = useState("");
+  // 整合包同理：先只读 modrinth.index.json，把"会下载什么、会覆盖什么、装哪个 loader"
+  // 摊开给用户看，确认之后才落盘
+  const [packInfo, setPackInfo] = useState<{ path: string; info: ModpackInfo } | null>(null);
+  const [packName, setPackName] = useState("");
 
   const reload = useCallback(async () => {
     const [list, ready, game] = await Promise.all([
@@ -309,6 +314,60 @@ export function InstancesView({ onOpenContent }: { onOpenContent: (slug: string)
       setNotice(t("instances.imported", { name: inst.name }));
     });
 
+  /** 第一步：选 .mrpack + 只读地看一眼索引。看完才谈安装。 */
+  const pickModpack = () =>
+    act("modpack:pick", async () => {
+      const picked = await open({
+        multiple: false,
+        title: t("instances.modpack"),
+        filters: [{ name: "Modrinth modpack (.mrpack)", extensions: ["mrpack"] }],
+      });
+      if (typeof picked !== "string") return;
+      const info = await ipc.modpackInspect(picked);
+      setPackInfo({ path: picked, info });
+      setPackName(info.name);
+    });
+
+  /** 第二步：用户看过内容并确认之后才下载落盘。 */
+  const doModpackInstall = () =>
+    act("modpack:run", async () => {
+      if (!packInfo) return;
+      const name = packName.trim();
+      const slug = uniqueSlug(toSlug(name || packInfo.info.name));
+      const res = await ipc.modpackInstall(packInfo.path, slug, name);
+      setPackInfo(null);
+      setPackName("");
+      const bits = [
+        t("instances.modpackInstalled", {
+          name: res.instance.name,
+          downloaded: res.downloaded,
+          mb: mbOf(res.bytes),
+          overrides: res.overrideFiles,
+        }),
+      ];
+      if (res.optionalInstalled > 0) {
+        bits.push(t("instances.modpackOptionalNote", { count: res.optionalInstalled }));
+      }
+      if (res.overwritten.length > 0) {
+        bits.push(
+          t("instances.modpackOverwritten", {
+            count: res.overwritten.length,
+            files: res.overwritten.slice(0, 5).join(", "),
+          }),
+        );
+      }
+      if (res.failed.length > 0) {
+        bits.push(
+          t("instances.modpackFailed", {
+            count: res.failed.length,
+            files: res.failed.slice(0, 5).join(", "),
+          }),
+        );
+      }
+      for (const w of res.warnings) bits.push(w);
+      setNotice(bits.join(" · "));
+    });
+
   const removeInstance = (inst: Instance) =>
     act(`${inst.slug}:delete`, async () => {
       if (!window.confirm(t("instances.deleteConfirm", { name: inst.name }))) return;
@@ -325,6 +384,9 @@ export function InstancesView({ onOpenContent }: { onOpenContent: (slug: string)
         <div className="row between">
           <h2>{t("nav.instances")}</h2>
           <div className="row">
+            <button type="button" className="link" onClick={() => void pickModpack()}>
+              {busy === "modpack:pick" ? "…" : t("instances.modpack")}
+            </button>
             <button type="button" className="link" onClick={() => void pickImport()}>
               {busy === "import:pick" ? "…" : t("instances.import")}
             </button>
@@ -472,8 +534,83 @@ export function InstancesView({ onOpenContent }: { onOpenContent: (slug: string)
         </section>
       )}
 
-      {instances && instances.length === 0 && <p className="muted">{t("instances.empty")}</p>}
+      {packInfo && (
+        <section className="card warn">
+          <h2>{t("instances.modpackTitle")}</h2>
+          <p className="muted small">
+            {t("instances.modpackSummary", {
+              name: packInfo.info.name,
+              version: packInfo.info.packVersion,
+              game: packInfo.info.minecraft ?? "—",
+            })}
+          </p>
+          <p className="small">{t("instances.modpackWarning")}</p>
+          <ul className="small audit">
+            {packInfo.info.minecraft === null ? (
+              <li>
+                {t("instances.modpackUninstallable", {
+                  reason: packInfo.info.warnings[0] ?? "minecraft version missing",
+                })}
+              </li>
+            ) : (
+              <>
+                <li>
+                  {packInfo.info.loader
+                    ? t("instances.modpackLoader", {
+                        loader: LOADER_LABELS[packInfo.info.loader],
+                        version: packInfo.info.loaderVersion ?? "",
+                      })
+                    : t("instances.modpackNoLoader")}
+                </li>
+                <li>
+                  {t("instances.modpackFiles", {
+                    required: packInfo.info.filesRequired,
+                    optional: packInfo.info.filesOptional,
+                    mb: mbOf(packInfo.info.bytes),
+                  })}
+                </li>
+                {packInfo.info.filesSkipped > 0 && (
+                  <li>{t("instances.modpackSkipped", { count: packInfo.info.filesSkipped })}</li>
+                )}
+                <li>
+                  {t("instances.modpackOverrides", { count: packInfo.info.overrideEntries })}
+                </li>
+                {packInfo.info.warnings.map((w) => (
+                  <li key={w}>{w}</li>
+                ))}
+              </>
+            )}
+          </ul>
+          <div className="row sub">
+            <label className="field inline grow">
+              <span>{t("instances.name")}</span>
+              <input value={packName} onChange={(e) => setPackName(e.target.value)} />
+            </label>
+            <button
+              type="button"
+              disabled={busy !== null || !packName.trim() || packInfo.info.minecraft === null}
+              onClick={() => void doModpackInstall()}
+            >
+              {busy === "modpack:run" ? "…" : t("instances.modpackConfirm")}
+            </button>
+            <button
+              type="button"
+              className="link"
+              onClick={() => {
+                setPackInfo(null);
+                setPackName("");
+              }}
+            >
+              {t("common.cancel")}
+            </button>
+            <span className="muted small">
+              → {uniqueSlug(toSlug(packName.trim() || packInfo.info.name))}
+            </span>
+          </div>
+        </section>
+      )}
 
+      {instances && instances.length === 0 && <p className="muted">{t("instances.empty")}</p>}
       {instances?.map((inst) => {
         const ready = installed.includes(inst.versionId);
         const isRunning = running === inst.slug;

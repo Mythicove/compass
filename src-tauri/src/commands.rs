@@ -22,6 +22,7 @@ use crate::java::{self, JavaRuntime};
 use crate::launch;
 use crate::loader::{self, LoaderKind, LoaderVersion};
 use crate::meta::{ManifestEntry, MetaClient};
+use crate::modpack::{self, ModpackInfo, ModpackInstall};
 use crate::net::{self, Downloader};
 use crate::paths::PathsInfo;
 use crate::runner;
@@ -496,6 +497,66 @@ pub async fn instance_import(
     tokio::task::spawn_blocking(move || instance::import(&paths, &path, &slug, &name))
         .await
         .map_err(join_err)?
+}
+
+/// 只读地看一眼 `.mrpack`：装之前先让用户知道它要下载什么、会覆盖什么。
+///
+/// 与 `instance_inspect_archive` 同一条理由：整合包决定我们下载哪些文件、往游戏目录
+/// 的哪里写，还决定装哪个 loader 版本。这些都是"外部文件决定我们做什么"，
+/// 所以先验后装，不是可选的预览。
+#[tauri::command]
+pub async fn modpack_inspect(path: PathBuf) -> Result<ModpackInfo, Error> {
+    tokio::task::spawn_blocking(move || modpack::inspect(&path))
+        .await
+        .map_err(join_err)?
+}
+
+/// 装一个 `.mrpack`：建实例 → 装游戏版本与 loader → 应用 overrides → 下载 files。
+///
+/// slug 由调用方给（不取自包内）。失败时实例目录会被整个删掉，不留半成品。
+#[tauri::command]
+pub async fn modpack_install(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    path: PathBuf,
+    slug: String,
+    name: String,
+) -> Result<ModpackInstall, Error> {
+    if instance::config_file(&state.paths, &slug)?.exists() {
+        return Err(Error::Invalid(format!("instance already exists: {slug}")));
+    }
+    let cfg = state.config.read().await.clone();
+    let dl = Downloader::new(
+        state.http.clone(),
+        cfg.download.concurrency,
+        cfg.download.mirror.clone(),
+    );
+    let installer = Installer::new(
+        MetaClient::new(state.http.clone(), cfg.download.mirror.clone()),
+        dl.clone(),
+        state.paths.clone(),
+    );
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let emitter = app.clone();
+    let forwarder = tokio::spawn(async move {
+        while let Some(p) = rx.recv().await {
+            let _ = emitter.emit(PROGRESS_EVENT, p);
+        }
+    });
+    let result = modpack::install(
+        &state.paths,
+        &state.api,
+        &installer,
+        &path,
+        &slug,
+        &name,
+        Some(tx),
+    )
+    .await;
+    // tx 在 result 之前 drop，转发任务才会结束
+    let _ = forwarder.await;
+    result
 }
 
 /// 探测这个实例会用哪个 Java（UI 展示 + 让用户在启动前就知道缺 Java）。

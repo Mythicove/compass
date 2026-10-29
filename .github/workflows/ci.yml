@@ -162,6 +162,21 @@ jobs:
           COMPASS_FORGE_DIR: ${{ runner.temp }}/compass-live
         run: cargo test --test forge_live -- --ignored --nocapture installs_modern_forge_for_real
 
+      - name: install a real Modrinth modpack (.mrpack)
+        working-directory: src-tauri
+        # 用仓库里那份真包（Fabulously Optimized 8.2.0 / 1.21.4，183KB），不是造出来的样本：
+        # 造出来的包只会验到"我以为的格式"。这一步覆盖整合包独有的三件事——
+        # 按 env.client 取舍文件、overrides/ 与 client-overrides/ 落进游戏目录、
+        # 按 dependencies 先装游戏版本与 loader 再建实例。
+        #
+        # 共用上面两步的数据目录：1.21.4 的原版库与资源已经在了，这一步只多下
+        # ~42MB 的 mod，所以三平台都跑得起。
+        # 失败回滚那条（a_failed_modpack_install_leaves_no_instance_behind）也一起跑：
+        # 它要联网装父版本，但装不了的是 loader 版本，代价很小。
+        env:
+          COMPASS_MODPACK_DIR: ${{ runner.temp }}/compass-live
+        run: cargo test --test modpack_live -- --ignored --nocapture
+
   package:
     name: package (${{ matrix.platform }})
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'create' && github.event.ref_type == 'tag')
