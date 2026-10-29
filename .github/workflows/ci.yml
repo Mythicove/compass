@@ -134,7 +134,12 @@ jobs:
         working-directory: src-tauri
         # 这一步要跑 6 个 Java 子进程（切分/改名/打补丁），对路径分隔符与 java
         # 可执行文件名敏感，所以必须三平台都跑：只在 Windows 上验过不算验过。
-        run: cargo test --test neoforge_live -- --ignored --nocapture
+        #
+        # 按名字只跑安装那个：同文件里的 launches_neoforge_for_real 要真启动游戏，
+        # 而 runner 没有显示服务，GLFW 建窗就炸，走不到我们要的标记行；它还要再
+        # 下一次 ~700MB。真启动是本地验收（需要一台有显示的机器），CI 覆盖到
+        # "装得出来 + 启动计划自洽"为止。
+        run: cargo test --test neoforge_live -- --ignored --nocapture installs_neoforge_for_real
 
   package:
     name: package (${{ matrix.platform }})
