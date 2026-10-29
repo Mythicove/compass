@@ -139,7 +139,28 @@ jobs:
         # 而 runner 没有显示服务，GLFW 建窗就炸，走不到我们要的标记行；它还要再
         # 下一次 ~700MB。真启动是本地验收（需要一台有显示的机器），CI 覆盖到
         # "装得出来 + 启动计划自洽"为止。
+        #
+        # 数据目录与下面的 Forge 步骤共用：两者都是 1.21.4，原版库与资源可以复用，
+        # 省掉一整套 ~350MB 的重复下载（真实启动器本来也是一个数据目录装多个版本）。
+        env:
+          COMPASS_NEOFORGE_DIR: ${{ runner.temp }}/compass-live
         run: cargo test --test neoforge_live -- --ignored --nocapture installs_neoforge_for_real
+
+      - name: install a real Forge version (bundled artifacts, no module path)
+        working-directory: src-tauri
+        # Forge 与 NeoForge 不是一套东西，不能靠"NeoForge 通了"推过来（都是实测差异）：
+        # - 版本号是 `<游戏版本>-<forge版本>`，1.12.2 那批的 loader 段有**四**位数字；
+        # - 版本 JSON 里每个版本都恰好有一条 `"url": ""` 的库，产物在 installer 的
+        #   maven/ 树里或由 processor 生成，不是下载来的；
+        # - 1.21.4 把打过补丁的 `:client` **列进了** classpath（NeoForge 一个游戏 jar
+        #   都不列），而它的 jvm 参数里没有模块路径，所以不存在自动模块名撞车。
+        #
+        # 只跑现代版本：legacy（1.12.2）要再下 ~1GB 的旧资源，而它独有的那条路径
+        # （从 installer 的 maven/ 树取产物）已有离线单测钉住，见
+        # forge::tests::installer_maven_tree_is_extracted_into_libraries。
+        env:
+          COMPASS_FORGE_DIR: ${{ runner.temp }}/compass-live
+        run: cargo test --test forge_live -- --ignored --nocapture installs_modern_forge_for_real
 
   package:
     name: package (${{ matrix.platform }})

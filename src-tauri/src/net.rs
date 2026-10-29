@@ -170,6 +170,20 @@ impl Downloader {
         if Self::is_complete(task).await {
             return Ok(0);
         }
+        // 空 URL 不是"下载失败"，是"这个文件本来就不该由我们下载"。
+        // Forge 的版本 JSON 里每个版本都恰好有一条 `"url": ""` 的库（实测 1.12.2 /
+        // 1.16.5 / 1.21.4 各一条），那是**本地产出**的：1.21.4 的是 binarypatcher 的输出
+        // （sha1 与 profile 里的 {PATCHED_SHA} 一致），1.12.2 / 1.16.5 的打包在 installer
+        // jar 的 maven/ 树里。走到这里说明该产出它的那一步没到位——
+        // 报一句 "http: builder error" 会把人整个带到网络问题上去。
+        if task.url.trim().is_empty() {
+            return Err(Error::Config(format!(
+                "{} has no download URL and is not present locally \
+                 (它应当由 installer 或 processor 产出，期望 sha1={})",
+                task.dest.display(),
+                task.sha1
+            )));
+        }
         if let Some(parent) = task.dest.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }

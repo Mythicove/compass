@@ -209,16 +209,18 @@ export interface JavaRuntime {
   is64bit: boolean;
 }
 
-/** Mod loader 类型（Forge 1.13+ 与 1.12 legacy 尚未接入）。 */
-export type LoaderKind = "fabric" | "quilt" | "neoforge";
+/** Mod loader 类型。Forge 的版本号是 `<游戏版本>-<forge版本>`（如 `1.21.4-54.1.22`），
+ *  与 NeoForge 的 `21.4.161` 不同构，UI 直接原样显示。 */
+export type LoaderKind = "fabric" | "quilt" | "neoforge" | "forge";
 
-export const LOADER_KINDS: LoaderKind[] = ["fabric", "quilt", "neoforge"];
+export const LOADER_KINDS: LoaderKind[] = ["fabric", "quilt", "neoforge", "forge"];
 
 /** 专有名词，不翻译（所以放在这里而不是 i18n 表里）。 */
 export const LOADER_LABELS: Record<LoaderKind, string> = {
   fabric: "Fabric",
   quilt: "Quilt",
   neoforge: "NeoForge",
+  forge: "Forge",
 };
 
 /** 一个可用的 loader 版本。`stable` 为 null 表示**来源没说**

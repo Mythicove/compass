@@ -17,46 +17,25 @@
 //! ```
 //! 别加 `--release`：`[profile.release] panic = "abort"` 与测试要的 unwind 冲突。
 
+mod live;
+
 use std::path::PathBuf;
 
-use compass_lib::api::ApiClient;
-use compass_lib::install::Installer;
 use compass_lib::loader::{self, LoaderKind};
-use compass_lib::meta::MetaClient;
-use compass_lib::net::Downloader;
 use compass_lib::paths::Paths;
 use compass_lib::version::OsInfo;
-
-fn env_or(key: &str, fallback: &str) -> String {
-    std::env::var(key).unwrap_or_else(|_| fallback.to_string())
-}
 
 #[tokio::test]
 #[ignore = "needs network, ~700MB of downloads and a Java runtime"]
 async fn installs_neoforge_for_real() {
-    let game = env_or("COMPASS_NEOFORGE_GAME", "1.21.4");
+    let game = live::env_or("COMPASS_NEOFORGE_GAME", "1.21.4");
     // 数据目录默认用临时目录；给 COMPASS_NEOFORGE_DIR 时可以复用上一次下载的东西
-    let holder;
-    let data = match std::env::var("COMPASS_NEOFORGE_DIR").ok() {
-        Some(dir) if !dir.trim().is_empty() => PathBuf::from(dir),
-        _ => {
-            holder = tempfile::tempdir().unwrap();
-            holder.path().join("data")
-        }
-    };
-    let paths = Paths::new(data);
+    let data = live::data_dir("COMPASS_NEOFORGE_DIR");
+    let paths = Paths::new(data.path().to_path_buf());
     paths.ensure().unwrap();
-    // 用 lib 自己的 http_client()，不要在测试里 `reqwest::Client::new()`：
-    // tauri 依赖 reqwest 0.13 而我们用 0.12，图里两份并存时测试目标里的
-    // `reqwest::Client` 名字有歧义（CI 上就因此编不过），而且裸建的 client
-    // 没有生产那份的超时与 User-Agent，等于没验到真正的配置。
-    let http = compass_lib::api::http_client().unwrap();
-    let api = ApiClient::new(http.clone());
-    let installer = Installer::new(
-        MetaClient::new(http.clone(), String::new()),
-        Downloader::new(http.clone(), 8, String::new()),
-        paths.clone(),
-    );
+    let http = live::http();
+    let api = live::api(&http);
+    let installer = live::installer(&paths, &http);
 
     // 1. 版本列表：Maven 元数据 + 按游戏版本过滤
     let versions = loader::versions(&api, LoaderKind::Neoforge, &game)
@@ -80,7 +59,7 @@ async fn installs_neoforge_for_real() {
         versions.iter().all(|v| v.stable.is_none()),
         "NeoForge 的 stable 应当全是 None"
     );
-    let chosen = env_or("COMPASS_NEOFORGE_VERSION", &versions[0].version);
+    let chosen = live::env_or("COMPASS_NEOFORGE_VERSION", &versions[0].version);
     println!("neoforge versions: {} (chosen {chosen})", versions.len());
 
     // 2. 装（父版本 → installer → processors → 子版本，全在 loader::install 里）
@@ -134,7 +113,7 @@ async fn installs_neoforge_for_real() {
 
     // jarsplitter 与 AutoRenamingTool 的中间产物：名字里带 neoform 时间戳，
     // 所以按关键字认，不写死文件名
-    let produced = walkdir_names(
+    let produced = live::walkdir_names(
         &paths
             .libraries()
             .join("net")
@@ -150,7 +129,7 @@ async fn installs_neoforge_for_real() {
     }
     // BINPATCH（installer jar 里的 data/client.lzma）必须被解出来过：
     // 它不在 libraries 下，而在 cache 的 forge-extract 里
-    let extracted = walkdir_names(&paths.cache().join("forge-extract"));
+    let extracted = live::walkdir_names(&paths.cache().join("forge-extract"));
     println!("extracted installer entries: {extracted:?}");
     assert!(
         extracted.iter().any(|n| n.ends_with(".lzma")),
@@ -187,7 +166,7 @@ async fn installs_neoforge_for_real() {
         paths: &paths,
         default_memory_mb: 4096,
         api_url: "https://mc.example.com",
-        java: java_path(),
+        java: live::java_path(),
         authlib_jar: None,
         prefetched_meta: None,
     })
@@ -258,41 +237,6 @@ where
     }
 }
 
-/// 列出一个目录树下所有文件名（不引 walkdir 依赖，测试里够用就行）。
-fn walkdir_names(root: &std::path::Path) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for e in entries.flatten() {
-            if e.path().is_dir() {
-                stack.push(e.path());
-            } else if let Some(n) = e.file_name().to_str() {
-                out.push(n.to_string());
-            }
-        }
-    }
-    out.sort();
-    out
-}
-
-fn java_path() -> PathBuf {
-    if let Ok(home) = std::env::var("JAVA_HOME")
-        && !home.is_empty()
-    {
-        let p =
-            PathBuf::from(&home)
-                .join("bin")
-                .join(if cfg!(windows) { "java.exe" } else { "java" });
-        if p.is_file() {
-            return p;
-        }
-    }
-    PathBuf::from(if cfg!(windows) { "java.exe" } else { "java" })
-}
-
 /// 真启动**我们自己装出来的**那份 NeoForge——W9 验收里"装完真启动"这半。
 ///
 /// 上面那个测试钉的是启动计划（classpath 组成、模块参数、asm 只有一份），
@@ -316,28 +260,17 @@ async fn launches_neoforge_for_real() {
         "ClassNotFoundException",
     ];
 
-    let game = env_or("COMPASS_NEOFORGE_GAME", "1.21.4");
-    let holder;
-    let data = match std::env::var("COMPASS_NEOFORGE_DIR").ok() {
-        Some(dir) if !dir.trim().is_empty() => PathBuf::from(dir),
-        _ => {
-            holder = tempfile::tempdir().unwrap();
-            holder.path().join("data")
-        }
-    };
-    let paths = Paths::new(data.clone());
+    let game = live::env_or("COMPASS_NEOFORGE_GAME", "1.21.4");
+    let data = live::data_dir("COMPASS_NEOFORGE_DIR");
+    let paths = Paths::new(data.path().to_path_buf());
     paths.ensure().unwrap();
-    let http = compass_lib::api::http_client().unwrap();
-    let api = ApiClient::new(http.clone());
-    let installer = Installer::new(
-        MetaClient::new(http.clone(), String::new()),
-        Downloader::new(http.clone(), 8, String::new()),
-        paths.clone(),
-    );
+    let http = live::http();
+    let api = live::api(&http);
+    let installer = live::installer(&paths, &http);
     let versions = loader::versions(&api, LoaderKind::Neoforge, &game)
         .await
         .unwrap();
-    let chosen = env_or("COMPASS_NEOFORGE_VERSION", &versions[0].version);
+    let chosen = live::env_or("COMPASS_NEOFORGE_VERSION", &versions[0].version);
     let installed = loader::install(&installer, &api, LoaderKind::Neoforge, &game, &chosen, None)
         .await
         .unwrap();
@@ -371,7 +304,7 @@ async fn launches_neoforge_for_real() {
         paths: &paths,
         default_memory_mb: 4096,
         api_url: "https://mc.example.com",
-        java: java_path(),
+        java: live::java_path(),
         authlib_jar: None,
         prefetched_meta: None,
     };
@@ -425,7 +358,7 @@ async fn launches_neoforge_for_real() {
     let _ = child.kill().await;
 
     let lines = log.lock().unwrap().clone();
-    let log_path = data.join("launch.log");
+    let log_path = data.path().join("launch.log");
     std::fs::write(&log_path, lines.join("\n")).ok();
     println!(
         "{} lines in {:.0}s, exit={:?}, log={}",

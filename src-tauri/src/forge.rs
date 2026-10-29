@@ -248,20 +248,7 @@ pub fn plan_processor(
     }
 
     let args = substitute(&p.args, vars, paths)?;
-    let mut outputs = Vec::new();
-    if let Some(map) = &p.outputs {
-        for (k, sha1) in map {
-            let resolved = substitute(std::slice::from_ref(k), vars, paths)?;
-            let path = PathBuf::from(&resolved[0]);
-            // 相对路径按 ROOT 解释（profile 里的 outputs 键实测是 {VAR} 形式）
-            let path = if path.is_absolute() {
-                path
-            } else {
-                paths.cache().join(path)
-            };
-            outputs.push((path, sha1.clone()));
-        }
-    }
+    let outputs = resolve_outputs(p, vars, paths)?;
     Ok(ProcessorRun {
         jar,
         classpath,
@@ -269,6 +256,36 @@ pub fn plan_processor(
         args,
         outputs,
     })
+}
+
+/// 把 profile 里的 `outputs` 解析成（产物路径, 期望 sha1）。
+///
+/// 键与值**都是** `{VAR}` 形式：键指向产物路径，值指向 data 里的期望 sha1
+/// （实测 Forge 1.21.4 写的是 `{MOJMAPS}={MOJMAPS_SHA}`）。只替换键的话，校验会拿
+/// 字面量 `"{MOJMAPS_SHA}"` 去比对真 sha1——必然失败，而且报错长得像"产物被篡改"，
+/// 把人往错误方向带。NeoForge 21.4 一个 `outputs` 都没有，所以这条路径只有真装
+/// Forge 才走得到；单独抽成函数是为了能离线钉住它（`plan_processor` 要 jar 在磁盘上）。
+pub fn resolve_outputs(
+    p: &Processor,
+    vars: &HashMap<String, String>,
+    paths: &Paths,
+) -> Result<Vec<(PathBuf, String)>, Error> {
+    let Some(map) = &p.outputs else {
+        return Ok(Vec::new());
+    };
+    let mut outputs = Vec::with_capacity(map.len());
+    for (k, sha1) in map {
+        let resolved = substitute(&[(*k).clone(), (*sha1).clone()], vars, paths)?;
+        let path = PathBuf::from(&resolved[0]);
+        // 相对路径按 ROOT 解释（profile 里的 outputs 键实测是 {VAR} 形式）
+        let path = if path.is_absolute() {
+            path
+        } else {
+            paths.cache().join(path)
+        };
+        outputs.push((path, resolved[1].clone()));
+    }
+    Ok(outputs)
 }
 
 /// data 里那些指向 **installer jar 内部**的条目（如 `/data/client.lzma`），先解到磁盘上。
@@ -300,6 +317,46 @@ pub fn extract_data_entries(
         }
     }
     Ok(out)
+}
+
+/// 把 installer jar 里 `maven/` 那棵树解到 `libraries/`（返回解出的文件数）。
+///
+/// Forge 的版本 JSON 里**每个版本都恰好有一条 `"url": ""` 的库**（实测 1.12.2 /
+/// 1.16.5 / 1.21.4 各一条）——那个产物不在 Maven 上，所以没有下载地址：
+/// - 1.12.2 / 1.16.5：它打包在 installer 的 `maven/<maven 路径>` 里，官方 installer
+///   就是从那儿拷的，这一步做的是同一件事；
+/// - 1.21.4：它是 binarypatcher 的输出（`{PATCHED}`，sha1 与那条库声明的一致），
+///   processor 先跑，文件已在位。
+///
+/// 对两种情况都安全：解出来的文件要么正是需要的，要么与 processor 的产物同路径同内容。
+/// 校验也没有因此放松——版本 JSON 给每条库都带了 sha1，下载器认"已就位"靠的就是它，
+/// 对不上的文件会被判为未完成并报错，不会被静默当成可用。
+pub fn extract_installer_maven(jar: &Path, libraries: &Path) -> Result<usize, Error> {
+    let file = std::fs::File::open(jar)?;
+    let mut zip = zip::ZipArchive::new(std::io::BufReader::new(file))?;
+    let names: Vec<String> = (0..zip.len())
+        .filter_map(|i| zip.by_index(i).ok().map(|e| e.name().to_string()))
+        .filter(|n| n.starts_with("maven/") && !n.ends_with('/'))
+        .collect();
+    let mut count = 0usize;
+    for name in names {
+        let rel = name.strip_prefix("maven/").unwrap_or(&name);
+        // 与解 zip 的其它路径一样过 zip-slip 检查：installer 是从 Maven 校验下来的，
+        // 但"来源可信"不等于"里面的路径都规矩"，写出库目录之外的代价太大
+        let rel = crate::archive::safe_rel_path(rel).map_err(|_| {
+            Error::Invalid(format!(
+                "refusing unsafe entry {name:?} in {}",
+                jar.display()
+            ))
+        })?;
+        let dest = libraries.join(&rel);
+        if dest.is_file() {
+            continue;
+        }
+        extract_entry(jar, &name, &dest)?;
+        count += 1;
+    }
+    Ok(count)
 }
 
 /// 内建变量 + data 变量。键名取自实测的 processor 参数。
@@ -957,5 +1014,382 @@ mod tests {
             );
             assert!(!args.is_empty(), "processor {i} 没有参数？");
         }
+    }
+
+    // ---- Forge：三份真 installer 里的原文（未裁剪）----
+    //
+    // 选这三个版本是因为它们**分属三套格式**，实现里走三条不同路径：
+    // - `1.21.4-54.1.22`：spec 1、7 个 processor（client 侧 3 个）、5 个带 outputs、
+    //   主类 `net.minecraftforge.bootstrap.ForgeBootstrap`、`--launchTarget forge_client`
+    // - `1.16.5-36.2.39`：spec 0、4 个 processor（都没有 sides = client 全跑）、
+    //   参数里有内联 Maven 坐标、工具是 SpecialSource、主类 `cpw.mods.modlauncher.Launcher`
+    // - `1.12.2-14.23.5.2864`：spec 0、**processors 是空数组**、data 也是空的、
+    //   版本 JSON 用旧式 `minecraftArguments` + `--tweakClass`、主类 `launchwrapper.Launch`
+    //
+    // NeoForge 只覆盖了第一套的一半（它一个 outputs 都没有），所以这三份不是冗余样本。
+    const FORGE_VERSIONS: [&str; 3] = ["1.21.4-54.1.22", "1.16.5-36.2.39", "1.12.2-14.23.5.2864"];
+
+    fn forge_profile(v: &str) -> InstallProfile {
+        let text = match v {
+            "1.21.4-54.1.22" => {
+                include_str!("../tests/fixtures/forge-1.21.4-54.1.22-install_profile.json")
+            }
+            "1.16.5-36.2.39" => {
+                include_str!("../tests/fixtures/forge-1.16.5-36.2.39-install_profile.json")
+            }
+            _ => include_str!("../tests/fixtures/forge-1.12.2-14.23.5.2864-install_profile.json"),
+        };
+        serde_json::from_str(text)
+            .unwrap_or_else(|e| panic!("{v} 的 install_profile.json 应当能解析: {e}"))
+    }
+
+    fn forge_version(v: &str) -> VersionJson {
+        let text = match v {
+            "1.21.4-54.1.22" => include_str!("../tests/fixtures/forge-1.21.4-54.1.22-version.json"),
+            "1.16.5-36.2.39" => include_str!("../tests/fixtures/forge-1.16.5-36.2.39-version.json"),
+            _ => include_str!("../tests/fixtures/forge-1.12.2-14.23.5.2864-version.json"),
+        };
+        VersionJson::parse(text).unwrap_or_else(|e| panic!("{v} 的 version.json 应当能解析: {e}"))
+    }
+
+    #[test]
+    fn forge_profiles_span_three_install_formats() {
+        let modern = forge_profile("1.21.4-54.1.22");
+        assert_eq!(modern.spec, 1);
+        assert_eq!(modern.json, "/version.json");
+        assert_eq!(modern.minecraft, "1.21.4");
+        assert_eq!(modern.processors.len(), 7);
+        assert_eq!(modern.libraries.len(), 21);
+        // client 侧只跑 3 个：[3] DOWNLOAD_MOJMAPS、[5] ForgeAutoRenamingTool、[6] binarypatcher。
+        // 其余 4 个是 server-only——其中 [0] 带 `--exec {ROOT}/run.sh`，
+        // 客户端安装跑到它就是**执行一个脚本**，sides 过滤错会有安全后果，不只是慢。
+        let client: Vec<usize> = modern
+            .processors
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.runs_on("client"))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(client, vec![3, 5, 6], "{client:?}");
+        assert!(modern.processors[0].args.iter().any(|a| a == "--exec"));
+        // NeoForge 21.4 一个 outputs 都没有，Forge 1.21.4 有 5 个：两边都不能假定
+        assert_eq!(
+            modern
+                .processors
+                .iter()
+                .filter(|p| p.outputs.is_some())
+                .count(),
+            5
+        );
+        // `{PATCHED}` 就是稍后要启动的 jar，profile 同时给了期望 sha1
+        assert_eq!(
+            modern.data["PATCHED"].client,
+            "[net.minecraftforge:forge:1.21.4-54.1.22:client]"
+        );
+        assert_eq!(
+            parse_data_value(&modern.data["PATCHED_SHA"].client).unwrap(),
+            DataValue::Literal("7e7d911be6deea351a1bbf77dda80fbc3e756eb1".into())
+        );
+        // 新扩展名：NeoForge 用 `@txt`，Forge 1.21.4 用 `@tsrg`（maven_path 认任意字母数字扩展名）
+        assert_eq!(
+            modern.data["MOJMAPS"].client,
+            "[net.minecraft:client:1.21.4:mappings@tsrg]"
+        );
+        assert_eq!(
+            version::maven_path("net.minecraft:client:1.21.4:mappings@tsrg").as_deref(),
+            Some("net/minecraft/client/1.21.4/client-1.21.4-mappings.tsrg")
+        );
+
+        let mid = forge_profile("1.16.5-36.2.39");
+        assert_eq!(mid.spec, 0);
+        assert_eq!(mid.processors.len(), 4);
+        assert!(
+            mid.processors.iter().all(|p| p.sides.is_empty()),
+            "1.16.5 没有 sides 字段 = client 全跑"
+        );
+        assert_eq!(mid.libraries.len(), 39);
+        // 内联 Maven 坐标（不是 `{VAR}`）出现在参数里，substitute 必须认
+        assert!(
+            mid.processors[0]
+                .args
+                .iter()
+                .any(|a| a == "[de.oceanlabs.mcp:mcp_config:1.16.5-20210115.111550@zip]")
+        );
+        // 工具链与 NeoForge 不同：SpecialSource 而不是 AutoRenamingTool
+        assert!(
+            mid.processors
+                .iter()
+                .any(|p| p.jar.starts_with("net.md-5:SpecialSource"))
+        );
+
+        let legacy = forge_profile("1.12.2-14.23.5.2864");
+        assert_eq!(legacy.spec, 0);
+        // 没有 processor：整个 pipeline 要能跳过，连 Java 都不必探测
+        assert!(
+            legacy.processors.is_empty(),
+            "{:?}",
+            legacy.processors.len()
+        );
+        assert!(legacy.data.is_empty());
+        assert_eq!(legacy.libraries.len(), 2);
+        assert_eq!(legacy.minecraft, "1.12.2");
+    }
+
+    #[test]
+    fn forge_version_jsons_settle_the_game_jar_question_per_format() {
+        // 判据是"游戏参数里有没有 --launchTarget"，三套格式给出的答案不同，
+        // 而且都必须对：1.13+ 由 fml/modlauncher 自己按坐标找补丁 jar（放了就撞自动模块名），
+        // 1.12.2 靠 launchwrapper + --tweakClass，**必须**有原版 jar 在 classpath 上。
+        for v in ["1.21.4-54.1.22", "1.16.5-36.2.39"] {
+            let j = forge_version(v);
+            assert!(
+                version::loader_provides_game_jar(&j),
+                "{v} 有 --launchTarget，不该由我们放游戏 jar"
+            );
+            assert!(j.arguments.is_some(), "{v} 用 modern arguments");
+        }
+        let modern = forge_version("1.21.4-54.1.22");
+        assert_eq!(modern.id, "1.21.4-forge-54.1.22");
+        assert_eq!(modern.inherits_from.as_deref(), Some("1.21.4"));
+        assert_eq!(
+            modern.main_class.as_deref(),
+            Some("net.minecraftforge.bootstrap.ForgeBootstrap")
+        );
+        assert_eq!(modern.libraries.len(), 49);
+        // Forge 1.21.4 的 target 是 `forge_client`（下划线），NeoForge 是 `neoforgeclient`，
+        // 1.16.5 是 `fmlclient`：判据认的是 `--launchTarget` 这个键，不是它的值
+        assert!(
+            modern
+                .arguments
+                .as_ref()
+                .unwrap()
+                .game
+                .iter()
+                .any(|a| matches!(a, crate::version::ArgItem::Plain(s) if s == "forge_client"))
+        );
+
+        let mid = forge_version("1.16.5-36.2.39");
+        assert_eq!(
+            mid.main_class.as_deref(),
+            Some("cpw.mods.modlauncher.Launcher")
+        );
+        assert_eq!(mid.libraries.len(), 26);
+
+        let legacy = forge_version("1.12.2-14.23.5.2864");
+        assert_eq!(legacy.id, "1.12.2-forge-14.23.5.2864");
+        assert_eq!(legacy.inherits_from.as_deref(), Some("1.12.2"));
+        assert_eq!(
+            legacy.main_class.as_deref(),
+            Some("net.minecraft.launchwrapper.Launch")
+        );
+        assert_eq!(legacy.libraries.len(), 22);
+        assert!(legacy.arguments.is_none(), "1.12.2 没有 modern arguments");
+        let args = legacy.minecraft_arguments.as_deref().unwrap();
+        assert!(args.contains("--tweakClass"), "{args}");
+        assert!(
+            args.contains("net.minecraftforge.fml.common.launcher.FMLTweaker"),
+            "{args}"
+        );
+        assert!(
+            !version::loader_provides_game_jar(&legacy),
+            "launchwrapper 要原版 jar 在 classpath 上"
+        );
+        // universal jar 是普通库（不是 processor 产物），必须在版本 JSON 里
+        assert!(
+            legacy
+                .libraries
+                .iter()
+                .any(|l| l.name == "net.minecraftforge:forge:1.12.2-14.23.5.2864")
+        );
+    }
+
+    #[test]
+    fn every_forge_processor_argument_substitutes() {
+        // 变量表是**按 profile 的 data 生成**的，不是写死一张表：Forge 1.21.4 用了
+        // NeoForge 没有的 MC_OFF / MOJMAPS_SHA / PATCHED_SHA，写死的表会漏。
+        let (_dir, paths) = paths();
+        for v in FORGE_VERSIONS {
+            let profile = forge_profile(v);
+            let mut vars: HashMap<String, String> = HashMap::new();
+            for k in profile.data.keys() {
+                vars.insert(k.clone(), format!("/tmp/{k}"));
+                vars.insert(format!("{k}_SHA"), format!("/tmp/{k}_SHA"));
+            }
+            for k in [
+                "SIDE",
+                "INSTALLER",
+                "ROOT",
+                "LIBRARY_DIR",
+                "MINECRAFT_VERSION",
+                "MINECRAFT_JAR",
+                "JAVA_HOME",
+            ] {
+                vars.insert(k.to_string(), format!("/tmp/{k}"));
+            }
+            for (i, proc) in profile.processors.iter().enumerate() {
+                let args = substitute(&proc.args, &vars, &paths).unwrap_or_else(|e| {
+                    panic!("Forge {v} processor {i} ({}) 的参数替换失败: {e}", proc.jar)
+                });
+                assert!(
+                    !args.iter().any(|a| a.contains('{')),
+                    "Forge {v} processor {i} 的参数里还有没替换的变量：{args:?}"
+                );
+                // 内联坐标要变成 libraries 下的路径，不能原样留给 Java
+                assert!(
+                    !args.iter().any(|a| a.starts_with('[') && a.ends_with(']')),
+                    "Forge {v} processor {i} 的内联 Maven 坐标没被解析：{args:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn installer_maven_tree_is_extracted_into_libraries() {
+        // Forge 每个版本都恰好有一条 `"url": ""` 的库；1.12.2 / 1.16.5 的那个产物
+        // 只存在于 installer 的 maven/ 树里。这一步现代版本用不到（1.21.4 的空 URL 库
+        // 是 binarypatcher 的产物），所以 live 测试盖不住它——必须有离线测试盯着。
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("installer-src");
+        let bundled = src.join("maven/net/minecraftforge/forge/1.12.2-x/forge-1.12.2-x.jar");
+        std::fs::create_dir_all(bundled.parent().unwrap()).unwrap();
+        std::fs::write(&bundled, b"universal").unwrap();
+        // maven/ 之外的条目不该被解出来（data/ 由 extract_data_entries 按 data 变量单独解）
+        std::fs::create_dir_all(src.join("data")).unwrap();
+        std::fs::write(src.join("data/client.lzma"), b"patches").unwrap();
+
+        let jar = dir.path().join("installer.jar");
+        crate::archive::zip_dir(&src, &jar, &[]).unwrap();
+
+        let paths = Paths::new(dir.path().join("data"));
+        paths.ensure().unwrap();
+        let n = extract_installer_maven(&jar, &paths.libraries()).unwrap();
+        assert_eq!(n, 1, "只该解出 maven/ 下面那一个文件");
+
+        let out = paths.libraries().join(
+            [
+                "net",
+                "minecraftforge",
+                "forge",
+                "1.12.2-x",
+                "forge-1.12.2-x.jar",
+            ]
+            .join(std::path::MAIN_SEPARATOR_STR),
+        );
+        assert_eq!(
+            std::fs::read(&out).unwrap(),
+            b"universal",
+            "{}",
+            out.display()
+        );
+        assert!(
+            !paths.libraries().join("data").exists(),
+            "maven/ 之外的条目不该被解到库里"
+        );
+
+        // 幂等：已经在位的文件不该被重写。重写会覆盖掉 processor 刚产出的同路径文件，
+        // 而两者的内容不一定相同（1.21.4 的 universal 在 maven/ 里，:client 是补丁产物）
+        assert_eq!(
+            extract_installer_maven(&jar, &paths.libraries()).unwrap(),
+            0,
+            "第二次不该再解任何文件"
+        );
+    }
+
+    #[test]
+    fn installer_maven_extraction_refuses_path_traversal() {
+        // installer 是从 Maven 按 sha1 校验下来的，但"来源可信"不等于"条目名规矩"：
+        // 写出 libraries/ 之外就是往用户机器上任意位置落文件
+        let dir = tempfile::tempdir().unwrap();
+        // 恶意 zip 自己不能放在穿越的目标路径上，否则断言检查的是测试自己造的文件
+        std::fs::create_dir_all(dir.path().join("installer")).unwrap();
+        let jar = dir.path().join("installer").join("evil.jar");
+        let file = std::fs::File::create(&jar).unwrap();
+        let mut zw = zip::ZipWriter::new(file);
+        zw.start_file(
+            "maven/../../evil.jar",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+        std::io::Write::write_all(&mut zw, b"pwned").unwrap();
+        zw.finish().unwrap();
+
+        let paths = Paths::new(dir.path().join("data"));
+        paths.ensure().unwrap();
+        // 穿越路径必须被拒绝（unwrap_err：返回 Ok 就是要修的 bug）
+        let err = extract_installer_maven(&jar, &paths.libraries()).unwrap_err();
+        assert!(err.to_string().contains("refusing unsafe entry"), "{err}");
+        assert!(
+            !dir.path().join("evil.jar").exists(),
+            "文件不该被写到库目录之外"
+        );
+    }
+
+    #[test]
+    fn processor_output_checksums_are_variables_too() {
+        // 真装 Forge 1.21.4 时炸出来的：outputs 的**值**是 `{MOJMAPS_SHA}` 这样的变量引用，
+        // 只替换键就会拿字面量去比对 sha1。症状是一句
+        // `want {MOJMAPS_SHA} got c23f3418…`——看起来像产物被篡改，其实是我们的替换漏了一半。
+        // NeoForge 21.4 一个 outputs 都没有，所以这条路只有真装 Forge 才走得到。
+        let (_dir, paths) = paths();
+        let profile = forge_profile("1.21.4-54.1.22");
+        let extracted: HashMap<String, PathBuf> =
+            [("BINPATCH".to_string(), PathBuf::from("/tmp/client.lzma"))].into();
+        let vars = resolve_vars(
+            &profile,
+            "client",
+            &paths,
+            Path::new("/tmp/installer.jar"),
+            Path::new("/tmp/1.21.4.jar"),
+            Path::new("/tmp/jdk"),
+            &extracted,
+        )
+        .unwrap();
+
+        let mojmaps = profile
+            .processors
+            .iter()
+            .find(|p| p.jar.contains("installertools") && p.runs_on("client"))
+            .expect("DOWNLOAD_MOJMAPS 那一步");
+        let out = resolve_outputs(mojmaps, &vars, &paths).unwrap();
+        assert_eq!(out.len(), 1);
+        assert!(
+            out[0].0.ends_with("client-1.21.4-mappings.tsrg"),
+            "{:?}",
+            out[0].0
+        );
+        assert_eq!(
+            out[0].1, "c23f3418d42c5c6b12b43c79ec56ba6b2621289f",
+            "值必须替换成 data 里的真 sha1（单引号字面量要去掉引号）"
+        );
+
+        // binarypatcher 的产物就是稍后要启动的 jar，它的 sha1 同样来自 data
+        let patcher = profile
+            .processors
+            .iter()
+            .find(|p| p.jar.contains("binarypatcher"))
+            .unwrap();
+        let out = resolve_outputs(patcher, &vars, &paths).unwrap();
+        assert!(
+            out[0].0.ends_with("forge-1.21.4-54.1.22-client.jar"),
+            "{:?}",
+            out[0].0
+        );
+        assert_eq!(out[0].1, "7e7d911be6deea351a1bbf77dda80fbc3e756eb1");
+
+        // 5 个带 outputs 的 processor 全都要解析成"绝对路径 + 40 位十六进制"，
+        // 一个 `{` 都不能剩（剩下的话 run_processor 会拿它当期望值去比对）
+        let mut total = 0;
+        for p in profile.processors.iter().filter(|p| p.outputs.is_some()) {
+            for (path, want) in resolve_outputs(p, &vars, &paths).unwrap() {
+                assert!(path.is_absolute(), "{path:?}");
+                assert_eq!(want.len(), 40, "{path:?} -> {want:?}");
+                assert!(
+                    want.chars().all(|c| c.is_ascii_hexdigit()),
+                    "没替换干净：{want:?}"
+                );
+                total += 1;
+            }
+        }
+        assert_eq!(total, 5, "这份 profile 有 5 个 processor 带 outputs");
     }
 }
