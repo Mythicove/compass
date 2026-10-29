@@ -448,6 +448,74 @@ pub fn export(
     crate::archive::zip_dir(&src, dest, extra)
 }
 
+/// 一个内容文件的来源。导出 `.mrpack` 时用来生成 `files[]`（下载地址 + sha1），
+/// 而没有来源的文件只能把字节塞进 `overrides/`——两者体积差一千倍
+/// （实测 46 个 mod 的实例：`files[]` 方式索引约 30KB，overrides 方式约 200MB）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Provenance {
+    pub url: String,
+    pub sha1: String,
+    pub size: u64,
+}
+
+/// 相对路径（游戏目录下，用 `/` 分隔）→ 来源。
+pub type ProvenanceMap = std::collections::BTreeMap<String, Provenance>;
+
+/// 来源簿记的落点。**放在实例目录而不是游戏目录**：游戏目录里的东西会被当成
+/// 整合包内容打包出去，而我们自己的簿记不该出现在别人的包里。
+pub fn provenance_file(paths: &Paths, slug: &str) -> Result<PathBuf, Error> {
+    Ok(instance_dir(paths, slug)?.join("provenance.json"))
+}
+
+pub fn load_provenance(paths: &Paths, slug: &str) -> ProvenanceMap {
+    // 读不出来就当没有：簿记丢了只是导出变大，不该让整个操作失败
+    provenance_file(paths, slug)
+        .ok()
+        .and_then(|f| std::fs::read_to_string(f).ok())
+        .and_then(|t| serde_json::from_str::<ProvenanceMap>(&t).ok())
+        .unwrap_or_default()
+}
+
+/// 记一条来源。读-改-写：一次只装一个文件，但簿记是全实例共享的。
+pub fn record_provenance(
+    paths: &Paths,
+    slug: &str,
+    rel_path: &str,
+    prov: Provenance,
+) -> Result<(), Error> {
+    let mut map = load_provenance(paths, slug);
+    map.insert(rel_path.replace('\\', "/"), prov);
+    write_provenance(paths, slug, &map)
+}
+
+/// 批量合并写入。一次装几十个文件（整合包）时逐条读-改-写会把同一个 JSON
+/// 重写几十遍，所以留一个批量口子；单条的 `record_provenance` 走同一条落盘路径。
+pub fn save_provenance(paths: &Paths, slug: &str, entries: &ProvenanceMap) -> Result<(), Error> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+    let mut map = load_provenance(paths, slug);
+    for (k, v) in entries {
+        map.insert(k.replace('\\', "/"), v.clone());
+    }
+    write_provenance(paths, slug, &map)
+}
+
+fn write_provenance(paths: &Paths, slug: &str, map: &ProvenanceMap) -> Result<(), Error> {
+    let file = provenance_file(paths, slug)?;
+    if let Some(parent) = file.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let text = serde_json::to_string_pretty(map)
+        .map_err(|e| Error::Config(format!("provenance is not serializable: {e}")))?;
+    // 先写 .part 再改名：写一半被打断不该留下一份读不出来的簿记
+    let part = crate::net::part_path(&file);
+    std::fs::write(&part, text)?;
+    std::fs::rename(&part, &file)?;
+    Ok(())
+}
+
 /// 导入前的"看一眼"：只读压缩包里的 `instance.json`，**不落盘任何东西**。
 ///
 /// 这一步不是装饰。实例配置里有 `java_path` 与自定义 JVM 参数，

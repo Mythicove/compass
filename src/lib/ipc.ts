@@ -187,6 +187,9 @@ export interface ModMeta {
   loaders: string[];
   /** 这个 jar 还顶替哪些 mod id（`fabric-api` 顶替 `fabric`）。依赖检查要算上它们。 */
   provides: string[];
+  /** mod 自己声明的运行侧（`client` / `server` / `*`）。只有 fabric.mod.json 有这个字段，
+   *  其它三种格式没有 → null（表示"来源没说"，不是"两侧都行"）。 */
+  environment: string | null;
   /** 全部依赖，按类型分开。已排序去重。 */
   deps: ModDep[];
 }
@@ -341,6 +344,20 @@ export interface ModpackInstall {
   deps: DependencyReport;
 }
 
+/** 一次整合包导出的结果。分类计数是为了让用户看懂"为什么这个包这么大"。 */
+export interface ModpackExport {
+  path: string;
+  /** 进了 `files[]` 的（只存地址与 sha1，安装方自己下） */
+  files: number;
+  /** 进了 `overrides/` 的实体文件（字节真的写进包里） */
+  overrideFiles: number;
+  bytes: number;
+  /** 有来源簿记但 sha1 与磁盘对不上（文件被换过）→ 退回 overrides */
+  stale: string[];
+  /** 被排除的用户数据目录（存档、日志、崩溃报告、截图） */
+  skippedDirs: string[];
+}
+
 export interface LaunchInfo {
   instance: string;
   versionId: string;
@@ -462,6 +479,9 @@ export const ipc = {
   /** slug 由调用方给，不取自整合包；失败时后端会把实例目录整个删掉 */
   modpackInstall: (path: string, slug: string, name: string) =>
     invoke<ModpackInstall>("modpack_install", { path, slug, name }),
+  /** 把实例导出成 .mrpack；dest 来自原生保存对话框。存档/日志/崩溃报告/截图不进包。 */
+  modpackExport: (slug: string, dest: string, packVersion: string) =>
+    invoke<ModpackExport>("modpack_export", { slug, dest, packVersion }),
   /** 这个实例会用哪个 Java；null = 没找到（此时启动会失败，UI 要提前说清楚） */
   instanceJava: (slug: string) => invoke<JavaRuntime | null>("instance_java", { slug }),
 

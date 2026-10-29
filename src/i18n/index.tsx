@@ -160,6 +160,14 @@ const zhCN: Messages = {
   "instances.importConfirm": "导入",
   "instances.imported": "已导入实例「{name}」",
   "instances.modpack": "安装整合包",
+  "instances.exportModpack": "导出为 .mrpack",
+  "instances.exportModpackVersion": "整合包版本号",
+  "instances.exportModpackHint":
+    "留空则用实例的版本 id。有来源记录的 mod 只写下载地址与 sha1（包很小），其余文件按字节放进 overrides/；存档、日志、崩溃报告与截图一律不进包。",
+  "instances.exportedModpack": "已导出：{files} 个文件走下载、{overrides} 个进 overrides · {mb} MB · {path}",
+  "instances.exportStale": "{count} 个文件的来源记录已过期（被改过），按字节放进了包里",
+  "instances.exportAllOverrides":
+    "这个实例里没有带来源记录的文件，所以全部按字节打包——包会很大，但内容完整",
   "instances.modpackTitle": "确认安装整合包",
   "instances.modpackWarning":
     "整合包决定下载哪些文件、写到游戏目录的哪里，以及装哪个 loader 版本。只在信任来源时继续。",
@@ -394,6 +402,14 @@ const en: Messages = {
   "instances.importConfirm": "Import",
   "instances.imported": "Imported instance “{name}”",
   "instances.modpack": "Install modpack",
+  "instances.exportModpack": "Export as .mrpack",
+  "instances.exportModpackVersion": "Pack version",
+  "instances.exportModpackHint":
+    "Leave blank to use the instance's version id. Mods with recorded provenance are written as a URL plus sha1 (small pack); everything else goes into overrides/ by value. Worlds, logs, crash reports and screenshots are never included.",
+  "instances.exportedModpack": "Exported: {files} file(s) by reference, {overrides} in overrides · {mb} MB · {path}",
+  "instances.exportStale": "{count} file(s) had stale provenance (changed on disk) and were packed by value",
+  "instances.exportAllOverrides":
+    "No file in this instance has recorded provenance, so everything was packed by value - the pack will be large but complete",
   "instances.modpackTitle": "Confirm modpack install",
   "instances.modpackWarning":
     "A modpack decides which files get downloaded, where they land in the game directory, and which loader version is installed. Only continue if you trust the source.",

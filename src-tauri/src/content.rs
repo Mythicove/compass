@@ -110,6 +110,13 @@ pub struct ModMeta {
     /// 7 个 mod 依赖 `fabric`，而装的是 `fabric-api`（它 `provides: ["fabric"]`）。
     #[serde(default)]
     pub provides: Vec<String>,
+    /// mod 自己声明的运行侧（fabric.mod.json 的 `environment`）。
+    /// 实测 46 个真 jar：`client` 30 个、`*` 13 个、字段缺失 3 个。
+    /// 导出 `.mrpack` 时用它生成 `files[].env`——比一律写"两侧都要"准确，
+    /// 也比一律写"只客户端"安全（服务端整合包会据此跳过客户端 mod）。
+    /// 其它三种格式（quilt / mods.toml / mcmod.info）没有对应字段 → None。
+    #[serde(default)]
+    pub environment: Option<String>,
     /// 全部依赖，按类型分开（不是一条拍平的字符串列表）。
     ///
     /// 曾经这里只有"必需依赖的展示字符串"，注释写着"把 optional / incompatible
@@ -260,6 +267,10 @@ struct FabricModJson {
     /// 其中 2 个自己还带 `jars`，所以要递归（深度见 `NESTED_DEPTH`）。
     #[serde(default)]
     jars: NestedJars,
+    /// mod 自己声明的运行侧（`client` / `server` / `*`）。实测 46 个真 jar 里
+    /// 30 个是 client、13 个是 `*`、3 个没有这个字段。
+    #[serde(default)]
+    environment: Option<String>,
     /// 这个 jar 还顶替哪些 mod id。实测 4/46 有：`fabric-api provides ["fabric"]`、
     /// `sodium provides ["indium"]`、`cloth-config provides ["cloth-config2"]`、
     /// `e4mc provides ["e4mc_minecraft"]`。
@@ -644,6 +655,7 @@ pub fn read_mod_meta(path: &Path) -> Option<ModMeta> {
                     conflicts,
                     jars,
                     provides,
+                    environment,
                 } = f;
                 let display = name.unwrap_or_else(|| id.clone());
                 // 五个段各归一类：depends 必需，recommends/suggests 可选，
@@ -667,6 +679,7 @@ pub fn read_mod_meta(path: &Path) -> Option<ModMeta> {
                     version: version.unwrap_or_default(),
                     loaders: Vec::new(),
                     provides: provides_from(provides),
+                    environment,
                     deps: deps_from(deps),
                 }
             }),
@@ -707,6 +720,9 @@ pub fn read_mod_meta(path: &Path) -> Option<ModMeta> {
                         version: version.unwrap_or_default(),
                         loaders: Vec::new(),
                         provides: provides_from(provides),
+                        // quilt.mod.json 没有对应的运行侧字段（实测样本里也没有），
+                        // 别凭印象加：写 None 就是"来源没说"，比猜一个准
+                        environment: None,
                         deps: deps_from(deps),
                     }
                 }),
@@ -717,8 +733,9 @@ pub fn read_mod_meta(path: &Path) -> Option<ModMeta> {
                     id: m.modid,
                     version: m.version.unwrap_or_default(),
                     loaders: Vec::new(),
-                    // mcmod.info 没有 provides 这个概念
+                    // mcmod.info 没有 provides 与运行侧的概念
                     provides: Vec::new(),
+                    environment: None,
                     // mcmod.info 的 dependencies 只有 modId，没有版本约束，
                     // 也表达不了"不兼容"，所以只有 required 一类
                     deps: deps_from(
@@ -760,6 +777,7 @@ pub fn read_mod_meta(path: &Path) -> Option<ModMeta> {
                         // mods.toml 没有 provides 这个概念（Forge/NeoForge 靠 JarJar
                         // 提供内嵌库，那是另一套机制，见 NESTED_DEPTH 的说明）
                         provides: Vec::new(),
+                        environment: None,
                         deps: deps_from(deps),
                     })
                 }),
@@ -2192,6 +2210,7 @@ versionRange="*"
             version: "1.0".into(),
             loaders: vec!["fabric".into()],
             provides: Vec::new(),
+            environment: None,
             deps,
         }
     }

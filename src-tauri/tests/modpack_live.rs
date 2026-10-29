@@ -285,3 +285,150 @@ async fn a_failed_modpack_install_leaves_no_instance_behind() {
         "实例列表里出现了装失败的包"
     );
 }
+
+/// 往返：装一个真包 → 导出成 .mrpack → 把导出的包再装成一个新实例。
+///
+/// 这一条钉的是**导出物本身可安装**，而不只是"能写出一个 zip"。
+/// 关键是体积：48 个 mod 共 42MB，而导出物应当只有几百 KB——有来源簿记的文件
+/// 写成了 `files[]`（地址 + sha1），只有配置按字节进 `overrides/`。
+/// 簿记要是没生效，这里会是一个 42MB 的包，断言会立刻指出来。
+#[tokio::test]
+#[ignore = "needs network: installs the pack, then re-installs the exported one"]
+async fn an_exported_pack_installs_back() {
+    let data = live::data_dir("COMPASS_MODPACK_DIR");
+    let paths = Paths::new(data.path().to_path_buf());
+    paths.ensure().unwrap();
+    let http = live::http();
+    let api = live::api(&http);
+    let installer = live::installer(&paths, &http);
+
+    // 源实例必须**新装**：来源簿记是安装时写下的，复用一个早于簿记功能装出来的
+    // 实例会得到 files=0（第一版就这么假红过——那不是导出的 bug，是样本不对）。
+    // 用自己的 slug，不依赖另一条测试留下的状态。
+    for slug in ["fo-export-src", "fo-roundtrip"] {
+        if instance::config_file(&paths, slug)
+            .map(|f| f.exists())
+            .unwrap_or(false)
+        {
+            instance::remove(&paths, slug).unwrap();
+        }
+    }
+    modpack::install(
+        &paths,
+        &api,
+        &installer,
+        &fixture(),
+        "fo-export-src",
+        "FO export source",
+        None,
+    )
+    .await
+    .expect("源实例应当装得起来（详细输出见 installs_a_real_mrpack_for_real）");
+
+    let dest = data.path().join("exported.mrpack");
+    let _ = std::fs::remove_file(&dest);
+    let out = modpack::export(&paths, "fo-export-src", &dest, "8.2.0-reexport")
+        .await
+        .unwrap();
+    let pack_size = std::fs::metadata(&dest).unwrap().len();
+    println!(
+        "exported: files={} overrides={} bytes={} stale={:?} skipped={:?} pack={}KB",
+        out.files,
+        out.override_files,
+        out.bytes,
+        out.stale,
+        out.skipped_dirs,
+        pack_size / 1024
+    );
+    // 48 个 mod 全都有来源簿记（它们是 modpack::install 下的），所以全进 files[]
+    assert_eq!(out.files, 48, "{out:?}");
+    assert!(
+        out.stale.is_empty(),
+        "刚装完不该有过期簿记：{:?}",
+        out.stale
+    );
+    assert!(out.override_files > 30, "{out:?}");
+    // 没启动过的实例不会有 logs/，所以只在它存在时要求被报告为跳过
+    // （精确的排除行为由离线测试 export_splits_known_files_from_the_rest 钉）
+    let game_src = instance::game_dir(&paths, "fo-export-src").unwrap();
+    if game_src.join("logs").is_dir() {
+        assert!(
+            out.skipped_dirs.iter().any(|d| d == "logs"),
+            "日志目录存在就该被报告为跳过：{:?}",
+            out.skipped_dirs
+        );
+    }
+    // 体积是这条测试的重点：42MB 的 mod 变成了几百 KB 的索引
+    assert!(
+        pack_size < 4 * 1024 * 1024,
+        "导出物 {}KB：来源簿记大概没生效（48 个 mod 共 42MB 全按字节打包了）",
+        pack_size / 1024
+    );
+
+    // 导出的包要能被我们自己的 inspect 读回来，形状与来源包一致
+    let info = modpack::inspect(&dest).unwrap();
+    println!(
+        "re-inspect: {} pack={} mc={:?} loader={:?} {:?} files={} overrides={}",
+        info.name,
+        info.pack_version,
+        info.minecraft,
+        info.loader,
+        info.loader_version,
+        info.files_total,
+        info.override_entries
+    );
+    assert_eq!(info.pack_version, "8.2.0-reexport");
+    assert_eq!(info.minecraft.as_deref(), Some("1.21.4"));
+    assert_eq!(
+        info.loader,
+        Some(compass_lib::loader::LoaderKind::Fabric),
+        "loader 依赖要从实例记录写进索引，否则装回来就是原版"
+    );
+    assert_eq!(info.loader_version.as_deref(), Some("0.19.3"));
+    assert_eq!(info.files_total, 48);
+    assert!(info.warnings.is_empty(), "{:?}", info.warnings);
+
+    if instance::config_file(&paths, "fo-roundtrip")
+        .map(|f| f.exists())
+        .unwrap_or(false)
+    {
+        instance::remove(&paths, "fo-roundtrip").unwrap();
+    }
+    let back = modpack::install(&paths, &api, &installer, &dest, "fo-roundtrip", "", None)
+        .await
+        .unwrap();
+    println!(
+        "re-installed: version={} name={} downloaded={} overrides={} failed={:?} missing={} blocked={}",
+        back.instance.version_id,
+        back.instance.name,
+        back.downloaded,
+        back.override_files,
+        back.failed,
+        back.deps.missing.len(),
+        back.deps.blocked.len()
+    );
+    assert_eq!(back.instance.version_id, "fabric-loader-0.19.3-1.21.4");
+    assert_eq!(back.failed, Vec::<String>::new());
+    assert_eq!(back.downloaded, 48, "48 个文件都该重新下下来");
+    assert!(back.deps.missing.is_empty(), "{:?}", back.deps.missing);
+    assert!(back.deps.blocked.is_empty(), "{:?}", back.deps.blocked);
+    // 名字留空时用包里的名字
+    assert_eq!(back.instance.name, info.name);
+
+    // 落点与来源一致：索引声明的每个文件都在
+    let game = instance::game_dir(&paths, "fo-roundtrip").unwrap();
+    for f in &info_files(&dest) {
+        let p = game.join(f.replace('/', std::path::MAIN_SEPARATOR_STR));
+        assert!(p.is_file(), "往返之后少了 {f}");
+    }
+}
+
+/// 导出包里索引声明的路径列表。
+fn info_files(pack: &Path) -> Vec<String> {
+    modpack::read_index(pack)
+        .unwrap()
+        .files
+        .into_iter()
+        .map(|f| f.path)
+        .collect()
+}

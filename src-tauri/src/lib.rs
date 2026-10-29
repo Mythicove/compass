@@ -94,6 +94,7 @@ pub fn run() {
             commands::instance_import,
             commands::modpack_inspect,
             commands::modpack_install,
+            commands::modpack_export,
             commands::instance_java,
             commands::content_list,
             commands::content_set_enabled,

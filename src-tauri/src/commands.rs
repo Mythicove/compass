@@ -22,7 +22,7 @@ use crate::java::{self, JavaRuntime};
 use crate::launch;
 use crate::loader::{self, LoaderKind, LoaderVersion};
 use crate::meta::{ManifestEntry, MetaClient};
-use crate::modpack::{self, ModpackInfo, ModpackInstall};
+use crate::modpack::{self, ModpackExport, ModpackInfo, ModpackInstall};
 use crate::net::{self, Downloader};
 use crate::paths::{Paths, PathsInfo};
 use crate::runner;
@@ -253,6 +253,21 @@ pub async fn hoard_install(
         )));
     }
     let item = content::item_for(&game, kind, &dest, true)?;
+    // 记下来源：导出 `.mrpack` 时靠它把这个文件写成 `files[]`（地址 + sha1）
+    // 而不是把字节塞进 overrides/。只有这里知道 URL，过了这一步就再也拿不到了。
+    if !file.url.trim().is_empty() {
+        let rel = format!("{}/{}", kind.dir_name(), file.filename);
+        let _ = instance::record_provenance(
+            &state.paths,
+            &slug,
+            &rel,
+            instance::Provenance {
+                sha1: file.hashes.get("sha1").cloned().unwrap_or_default(),
+                size: file.size.max(0) as u64,
+                url: file.url.clone(),
+            },
+        );
+    }
     // W11 的冲突闸门。**下载之后**才查：依赖与冲突写在 jar 里的元数据中，
     // 下下来是唯一能读到的办法。命中无条件冲突就把文件删掉再报错——
     // 留在目录里等于"我们拦下了它，但它还在"，下次启动照样炸。
@@ -610,6 +625,23 @@ pub async fn modpack_install(
     // tx 在 result 之前 drop，转发任务才会结束
     let _ = forwarder.await;
     result
+}
+
+/// 把实例导出成 `.mrpack`。
+///
+/// 有来源簿记的文件写成 `files[]`（只存地址与 sha1），其余的把字节塞进 `overrides/`——
+/// 两者体积差一千倍。存档、日志、崩溃报告与截图一律不进包（那是本人的数据）。
+#[tauri::command]
+pub async fn modpack_export(
+    state: State<'_, Arc<AppState>>,
+    slug: String,
+    dest: PathBuf,
+    pack_version: String,
+) -> Result<ModpackExport, Error> {
+    // 不套 spawn_blocking：export 是 async 的（sha1 走 tokio::fs），
+    // 而在 blocking 线程里 block_on 同一个运行时会直接 panic
+    let paths = state.paths.clone();
+    modpack::export(&paths, &slug, &dest, &pack_version).await
 }
 
 /// 探测这个实例会用哪个 Java（UI 展示 + 让用户在启动前就知道缺 Java）。

@@ -13,7 +13,7 @@
 //! `archive::safe_rel_path`；下载只接受 http/https。
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -407,6 +407,10 @@ pub async fn install(
         }
     };
 
+    // 来源簿记落盘。放在回滚之后：装失败时实例目录整个删掉，簿记也跟着没了，
+    // 不会留下一份指向不存在文件的记录
+    instance::save_provenance(paths, slug, &outcome.provenance)?;
+
     // 装完做一次全实例体检。loader 类型要用**装完之后的**那个（可能是 None → 原版），
     // 因为 minecraft / fabricloader 这些 id 是不是"平台已提供"取决于它
     let deps = crate::content::check_instance(&game_dir, inst.loader.as_ref().map(|l| l.kind));
@@ -436,6 +440,8 @@ struct PopulateOutcome {
     override_files: usize,
     overwritten: Vec<String>,
     failed: Vec<String>,
+    /// 每个下载文件的来源，装完写进实例的簿记（导出 `.mrpack` 时用它生成 `files[]`）
+    provenance: crate::instance::ProvenanceMap,
 }
 
 /// 应用 overrides + 下载 files。
@@ -457,6 +463,7 @@ async fn populate(
     let (override_files, mut overwritten) = apply_overrides(archive_path, game_dir)?;
 
     let mut tasks = Vec::new();
+    let mut provenance = crate::instance::ProvenanceMap::new();
     let mut optional_installed = 0usize;
     let mut skipped = 0usize;
     for f in &index.files {
@@ -494,12 +501,23 @@ async fn populate(
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        let sha1 = f.hashes.get("sha1").cloned().unwrap_or_default();
         tasks.push(FileTask {
             url: url.clone(),
             dest,
-            sha1: f.hashes.get("sha1").cloned().unwrap_or_default(),
+            sha1: sha1.clone(),
             size: f.file_size,
         });
+        // 来源簿记：导出 `.mrpack` 时靠它把文件写成 `files[]`（只存地址与哈希）
+        // 而不是把字节塞进 overrides/。键一律用 `/`，与索引里的 path 一致。
+        provenance.insert(
+            f.path.replace('\\', "/"),
+            crate::instance::Provenance {
+                url: url.clone(),
+                sha1,
+                size: f.file_size,
+            },
+        );
     }
 
     let summary = installer.downloader().download_all(tasks, progress).await;
@@ -512,6 +530,7 @@ async fn populate(
         override_files,
         overwritten,
         failed: summary.failed,
+        provenance,
     })
 }
 
@@ -573,6 +592,278 @@ fn apply_overrides(archive_path: &Path, game_dir: &Path) -> Result<(usize, Vec<S
 /// 供测试与 UI 复用：整合包里的 loader 键名。
 pub fn known_loader_keys() -> Vec<&'static str> {
     vec!["fabric-loader", "quilt-loader", "forge", "neoforge"]
+}
+
+// ---------------------------------------------------------------------------
+// 导出
+// ---------------------------------------------------------------------------
+
+/// `dependencies` 里的 loader 键名（与 `loader_of` 互为反向）。
+fn loader_key(kind: LoaderKind) -> &'static str {
+    match kind {
+        LoaderKind::Fabric => "fabric-loader",
+        LoaderKind::Quilt => "quilt-loader",
+        LoaderKind::Forge => "forge",
+        LoaderKind::Neoforge => "neoforge",
+    }
+}
+
+/// mod 自己声明的运行侧 → mrpack 的 `env`。
+///
+/// 用 mod 元数据里的 `environment`，不是一律写"两侧都要"：实测 46 个真 jar 里
+/// 30 个是 `client`，一律写 required 会让服务端整合包装上 30 个客户端 mod。
+/// 也没有一律写"只客户端"——那会让 `*`（13 个）与 server-only 的 mod 被漏掉。
+fn env_of(environment: Option<&str>) -> (String, String) {
+    match environment.unwrap_or("*").trim() {
+        "client" => ("required".into(), "unsupported".into()),
+        "server" => ("unsupported".into(), "required".into()),
+        // `*`、空、以及我们不认识的值都按"两侧都要"：多装一个比少装一个安全，
+        // 而且这与导入侧对缺失 `env` 的处理一致
+        _ => ("required".into(), "required".into()),
+    }
+}
+
+/// 不进整合包的用户数据。存档是**本人的进度**，日志与崩溃报告是本机的诊断，
+/// 截图更是纯个人文件；把它们打进分享包既臃肿又泄露。
+const EXPORT_SKIP_DIRS: [&str; 4] = ["saves", "logs", "crash-reports", "screenshots"];
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportEnv {
+    client: String,
+    server: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportFile {
+    path: String,
+    hashes: HashMap<String, String>,
+    env: ExportEnv,
+    downloads: Vec<String>,
+    file_size: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportIndex {
+    format_version: u32,
+    game: String,
+    version_id: String,
+    name: String,
+    files: Vec<ExportFile>,
+    dependencies: HashMap<String, String>,
+}
+
+/// 导出结果。分类计数是重点：用户要能看出"为什么这个包这么大"。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModpackExport {
+    pub path: String,
+    /// 进 `files[]` 的（有来源簿记，且 sha1 与磁盘一致）
+    pub files: usize,
+    /// 进 `overrides/` 的实体文件（字节真的写进包里）
+    pub override_files: usize,
+    pub bytes: u64,
+    /// 有簿记但 sha1 与磁盘对不上（文件被换过）→ 退回 overrides
+    pub stale: Vec<String>,
+    /// 被排除的用户数据目录
+    pub skipped_dirs: Vec<String>,
+}
+
+/// 把实例导出成 `.mrpack`。
+///
+/// 分两类装：**有来源簿记**的文件写成 `files[]`（只存地址与 sha1，安装方自己下），
+/// 其余的把字节塞进 `overrides/`。差别是体积：实测 46 个 mod 的实例，
+/// 全走 overrides 约 200MB，全走 files 索引只有约 30KB。
+///
+/// 簿记的 sha1 会与磁盘上的文件**重新核对**，对不上就退回 overrides：
+/// 用户换过一个 mod 文件之后，簿记里的地址与哈希都是旧的，照着写出去
+/// 会让安装方下到一个与包里声明不符的东西。
+pub async fn export(
+    paths: &Paths,
+    slug: &str,
+    dest: &Path,
+    pack_version: &str,
+) -> Result<ModpackExport, Error> {
+    let inst = instance::load(paths, slug)?;
+    let game_dir = instance::game_dir(paths, slug)?;
+    if !game_dir.is_dir() {
+        return Err(Error::NotFound(format!(
+            "{} has no game directory yet",
+            game_dir.display()
+        )));
+    }
+    let instance_dir = instance::instance_dir(paths, slug)?;
+    // 目标不能在被打包的目录里：否则边写边读，包会一路长到自己把自己吃进去
+    if dest.starts_with(&instance_dir) {
+        return Err(Error::Invalid(format!(
+            "refusing to export into the instance itself: {}",
+            dest.display()
+        )));
+    }
+
+    let provenance = instance::load_provenance(paths, slug);
+    let mut files: Vec<ExportFile> = Vec::new();
+    let mut overrides: Vec<(String, PathBuf)> = Vec::new();
+    let mut stale = Vec::new();
+    let mut bytes = 0u64;
+
+    // 被跳过的用户数据目录：`walk_game_dir` 根本不下潜到它们里面（存档可能几个 GB，
+    // 走进去再过滤等于白读一遍），所以这里单独按"目录存在"报告
+    let skipped: Vec<String> = EXPORT_SKIP_DIRS
+        .iter()
+        .filter(|d| game_dir.join(d).is_dir())
+        .map(|d| d.to_string())
+        .collect();
+
+    for (rel, abs) in walk_game_dir(&game_dir)? {
+        let size = std::fs::metadata(&abs)?.len();
+        bytes += size;
+        let prov = provenance.get(&rel).filter(|p| !p.url.trim().is_empty());
+        // 有簿记也要与磁盘核对：sha1 对不上说明文件被换过，簿记已经过期
+        let usable = match prov {
+            Some(p) => {
+                let actual = crate::net::sha1_of_file(&abs).await.unwrap_or_default();
+                if !p.sha1.is_empty() && actual.eq_ignore_ascii_case(&p.sha1) {
+                    Some(p)
+                } else {
+                    stale.push(rel.clone());
+                    None
+                }
+            }
+            None => None,
+        };
+        match usable {
+            Some(p) => {
+                let (client, server) = if rel.starts_with("mods/") {
+                    let env = crate::content::read_mod_meta(&abs).and_then(|m| m.environment);
+                    env_of(env.as_deref())
+                } else {
+                    env_of(None)
+                };
+                let mut hashes = HashMap::new();
+                hashes.insert("sha1".to_string(), p.sha1.clone());
+                files.push(ExportFile {
+                    path: rel,
+                    hashes,
+                    env: ExportEnv { client, server },
+                    downloads: vec![p.url.clone()],
+                    file_size: p.size.max(size),
+                });
+            }
+            None => overrides.push((rel, abs)),
+        }
+    }
+
+    // 依赖：游戏版本 + loader。两者都取自实例记录，不猜。
+    let mut dependencies = HashMap::new();
+    let game_version = inst
+        .loader
+        .as_ref()
+        .map(|l| l.game_version.clone())
+        .unwrap_or_else(|| inst.version_id.clone());
+    dependencies.insert("minecraft".to_string(), game_version);
+    if let Some(l) = &inst.loader {
+        dependencies.insert(loader_key(l.kind).to_string(), l.version.clone());
+    }
+
+    let index = ExportIndex {
+        format_version: 1,
+        game: "minecraft".to_string(),
+        // 空版本号会让安装方分不清这是哪一版；用实例名兜底也比留空好
+        version_id: if pack_version.trim().is_empty() {
+            inst.version_id.clone()
+        } else {
+            pack_version.trim().to_string()
+        },
+        name: if inst.name.trim().is_empty() {
+            slug.to_string()
+        } else {
+            inst.name.clone()
+        },
+        files,
+        dependencies,
+    };
+
+    write_pack(dest, &index, &overrides)?;
+    Ok(ModpackExport {
+        path: dest.to_string_lossy().into_owned(),
+        files: index.files.len(),
+        override_files: overrides.len(),
+        bytes,
+        stale,
+        skipped_dirs: skipped,
+    })
+}
+
+/// 把索引与 overrides 写成一个 `.mrpack`。
+fn write_pack(
+    dest: &Path,
+    index: &ExportIndex,
+    overrides: &[(String, PathBuf)],
+) -> Result<(), Error> {
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    // 先写 .part 再改名：打包到一半失败不该留下一个看着完整、其实缺尾巴的 zip
+    let part = crate::net::part_path(dest);
+    {
+        let file = std::fs::File::create(&part)?;
+        let mut zip = zip::ZipWriter::new(file);
+        let opts: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        let text = serde_json::to_vec_pretty(index)
+            .map_err(|e| Error::Config(format!("modpack index is not serializable: {e}")))?;
+        zip.start_file(INDEX_ENTRY, opts)?;
+        std::io::Write::write_all(&mut zip, &text)?;
+        for (rel, abs) in overrides {
+            // 条目名一律用 `/`：zip 的规范如此，而 Windows 上 rel 可能带 `\`
+            let entry = format!("overrides/{}", rel.replace('\\', "/"));
+            zip.start_file(&entry, opts)?;
+            let mut src = std::fs::File::open(abs)?;
+            std::io::copy(&mut src, &mut zip)?;
+        }
+        zip.finish()?;
+    }
+    std::fs::rename(&part, dest)?;
+    Ok(())
+}
+
+/// 遍历游戏目录，返回（相对路径用 `/` 分隔, 绝对路径）。跳过 `archive::SKIP_DIRS`
+/// 与临时文件——那些是下载器留下的半成品，不该进包。
+fn walk_game_dir(root: &Path) -> Result<Vec<(String, PathBuf)>, Error> {
+    let mut out = Vec::new();
+    let mut stack = vec![(root.to_path_buf(), String::new())];
+    while let Some((dir, prefix)) = stack.pop() {
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            let ft = entry.file_type()?;
+            if ft.is_symlink() {
+                continue;
+            }
+            let rel = if prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{prefix}{name}")
+            };
+            let path = entry.path();
+            if ft.is_dir() {
+                if crate::archive::SKIP_DIRS.contains(&name.as_str())
+                    || EXPORT_SKIP_DIRS.contains(&name.as_str())
+                {
+                    continue;
+                }
+                stack.push((path, format!("{rel}/")));
+            } else if !crate::archive::skip_file(&name) {
+                out.push((rel, path));
+            }
+        }
+    }
+    // 稳定顺序：包的内容不该随目录遍历顺序变化（否则同样的实例两次导出字节不同）
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -826,6 +1117,152 @@ mod tests {
                 ("modrinth.index.json.unrelated", b"x"),
             ],
         )
+    }
+
+    #[tokio::test]
+    async fn export_splits_known_files_from_the_rest() {
+        // 三条分界都要验：有簿记且 sha1 对得上 → files[]（只存地址）；
+        // 簿记过期（文件被换过）→ 退回 overrides 并记进 stale；
+        // 用户数据（saves/logs/crash-reports/screenshots）→ 根本不进包。
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path().join("data"));
+        paths.ensure().unwrap();
+        let inst = Instance {
+            slug: "exp".into(),
+            name: "Exported".into(),
+            version_id: "fabric-loader-0.19.3-1.21.4".into(),
+            created_at: 1,
+            loader: Some(InstanceLoader {
+                kind: LoaderKind::Fabric,
+                version: "0.19.3".into(),
+                game_version: "1.21.4".into(),
+            }),
+            ..Instance::default()
+        };
+        instance::save(&paths, &inst).unwrap();
+        let game = instance::game_dir(&paths, "exp").unwrap();
+
+        // 一个带 environment=client 的真 zip，用来验 env 取自 mod 自己的声明
+        let src = dir.path().join("mod-src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(
+            src.join("fabric.mod.json"),
+            r#"{ "id": "clientonly", "version": "1.0", "name": "Client Only",
+                 "environment": "client" }"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(game.join("mods")).unwrap();
+        crate::archive::zip_dir(&src, &game.join("mods/clientonly.jar"), &[]).unwrap();
+        std::fs::write(game.join("mods/stale.jar"), b"replaced-by-the-user").unwrap();
+        std::fs::create_dir_all(game.join("config")).unwrap();
+        std::fs::write(game.join("config/x.toml"), b"toml").unwrap();
+        std::fs::write(game.join("options.txt"), b"fov:90").unwrap();
+        std::fs::create_dir_all(game.join("saves/world")).unwrap();
+        std::fs::write(game.join("saves/world/level.dat"), b"my-progress").unwrap();
+        std::fs::create_dir_all(game.join("logs")).unwrap();
+        std::fs::write(game.join("logs/latest.log"), b"secret-ish").unwrap();
+
+        let good = crate::net::sha1_of_file(&game.join("mods/clientonly.jar"))
+            .await
+            .unwrap();
+        let mut prov = crate::instance::ProvenanceMap::new();
+        prov.insert(
+            "mods/clientonly.jar".into(),
+            crate::instance::Provenance {
+                url: "https://cdn.example/clientonly.jar".into(),
+                sha1: good.clone(),
+                size: 1234,
+            },
+        );
+        prov.insert(
+            "mods/stale.jar".into(),
+            crate::instance::Provenance {
+                url: "https://cdn.example/stale.jar".into(),
+                // 簿记里的哈希与磁盘对不上：用户换过这个文件
+                sha1: "0".repeat(40),
+                size: 1,
+            },
+        );
+        prov.insert(
+            "mods/gone.jar".into(),
+            crate::instance::Provenance {
+                url: "https://cdn.example/gone.jar".into(),
+                sha1: "1".repeat(40),
+                size: 1,
+            },
+        );
+        instance::save_provenance(&paths, "exp", &prov).unwrap();
+
+        let dest = dir.path().join("out.mrpack");
+        let out = export(&paths, "exp", &dest, "1.0").await.unwrap();
+        println!("{out:?}");
+        assert_eq!(out.files, 1, "只有簿记对得上的那个进 files[]");
+        // config/x.toml、options.txt、mods/stale.jar（簿记过期退回）；gone.jar 不在磁盘上
+        assert_eq!(out.override_files, 3, "{out:?}");
+        assert_eq!(out.stale, vec!["mods/stale.jar".to_string()], "{out:?}");
+        assert_eq!(
+            out.skipped_dirs,
+            // 顺序跟 EXPORT_SKIP_DIRS 的声明序（saves 排第一：那是最重要的排除项）
+            vec!["saves".to_string(), "logs".to_string()],
+            "用户数据不该进包：{out:?}"
+        );
+        assert!(dest.is_file());
+
+        let index = read_index(&dest).unwrap();
+        assert_eq!(index.format_version, 1);
+        assert_eq!(index.game, "minecraft");
+        assert_eq!(index.version_id, "1.0");
+        assert_eq!(index.name, "Exported");
+        assert_eq!(index.files.len(), 1);
+        assert_eq!(index.files[0].path, "mods/clientonly.jar");
+        assert_eq!(
+            index.files[0].downloads,
+            vec!["https://cdn.example/clientonly.jar".to_string()]
+        );
+        assert_eq!(
+            index.files[0].hashes.get("sha1").map(String::as_str),
+            Some(good.as_str())
+        );
+        // env 来自 mod 自己声明的 environment=client，不是一律写"两侧都要"
+        let env = index.files[0].env.as_ref().expect("files 应当带 env");
+        assert_eq!(env.client, "required");
+        assert_eq!(env.server, "unsupported");
+        assert_eq!(
+            index.dependencies.get("minecraft").map(String::as_str),
+            Some("1.21.4"),
+            "游戏版本取自实例记录，不是猜的"
+        );
+        assert_eq!(
+            index.dependencies.get("fabric-loader").map(String::as_str),
+            Some("0.19.3")
+        );
+
+        // 包里不该有用户数据，也不该把我们自己的簿记打进去
+        let (_, entries) = override_entries(&dest).unwrap();
+        assert!(
+            !entries
+                .iter()
+                .any(|e| e.contains("saves") || e.contains("logs")),
+            "{entries:?}"
+        );
+        assert!(
+            !entries.iter().any(|e| e.contains("provenance")),
+            "我们自己的簿记不该出现在别人的包里：{entries:?}"
+        );
+        assert!(
+            entries.iter().any(|e| e == "overrides/mods/stale.jar"),
+            "{entries:?}"
+        );
+
+        // 目标落在实例目录里必须被拒绝：边写边读会让包一路长到自己把自己吃进去
+        let inside = instance::instance_dir(&paths, "exp")
+            .unwrap()
+            .join("bad.mrpack");
+        let err = export(&paths, "exp", &inside, "1.0")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("into the instance itself"), "{err}");
     }
 
     #[test]

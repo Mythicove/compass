@@ -91,6 +91,8 @@ export function InstancesView({ onOpenContent }: { onOpenContent: (slug: string)
   // 导出面板（要不要带存档得先问清楚：存档通常是实例里最大的部分，也是本人的进度）
   const [exportOf, setExportOf] = useState<string | null>(null);
   const [exportSaves, setExportSaves] = useState(true);
+  // .mrpack 的版本号是包自己的（不是游戏版本），留空则退回实例的版本 id
+  const [packVersion, setPackVersion] = useState("");
   // 导入确认：先只读压缩包里的 instance.json（不落盘），把会影响启动的内容摊开给用户看
   const [importInfo, setImportInfo] = useState<{ path: string; info: ArchiveInfo } | null>(null);
   const [importName, setImportName] = useState("");
@@ -286,6 +288,36 @@ export function InstancesView({ onOpenContent }: { onOpenContent: (slug: string)
           path: dest,
         }),
       );
+    });
+
+  /** 导出成 .mrpack：有来源簿记的文件只写地址，其余的把字节塞进 overrides/。 */
+  const exportModpack = (inst: Instance) =>
+    act(`${inst.slug}:exportPack`, async () => {
+      const dest = await save({
+        defaultPath: `${inst.slug}.mrpack`,
+        filters: [{ name: "Modrinth modpack (.mrpack)", extensions: ["mrpack"] }],
+        title: t("instances.exportModpack"),
+      });
+      if (!dest) return;
+      const out = await ipc.modpackExport(inst.slug, dest, packVersion);
+      setExportOf(null);
+      const bits = [
+        t("instances.exportedModpack", {
+          files: out.files,
+          overrides: out.overrideFiles,
+          mb: mbOf(out.bytes),
+          path: dest,
+        }),
+      ];
+      // 簿记过期意味着用户换过文件：那些文件按字节进了包，包会因此变大，
+      // 但内容仍然是对的——说清楚比让用户猜"为什么这个包 200MB"好
+      if (out.stale.length > 0) {
+        bits.push(t("instances.exportStale", { count: out.stale.length }));
+      }
+      if (out.overrideFiles > 0 && out.files === 0) {
+        bits.push(t("instances.exportAllOverrides"));
+      }
+      setNotice(bits.join(" · "));
     });
 
   /** 第一步：选包 + 只读地看一眼。看完才谈导入。 */
@@ -763,10 +795,26 @@ export function InstancesView({ onOpenContent }: { onOpenContent: (slug: string)
                   >
                     {busy === `${inst.slug}:export` ? "…" : t("instances.export")}
                   </button>
+                  <button
+                    type="button"
+                    disabled={busy !== null}
+                    onClick={() => void exportModpack(inst)}
+                  >
+                    {busy === `${inst.slug}:exportPack` ? "…" : t("instances.exportModpack")}
+                  </button>
                   <button type="button" className="link" onClick={() => setExportOf(null)}>
                     {t("common.cancel")}
                   </button>
                 </div>
+                <label className="field inline">
+                  <span>{t("instances.exportModpackVersion")}</span>
+                  <input
+                    value={packVersion}
+                    placeholder={inst.versionId}
+                    onChange={(e) => setPackVersion(e.target.value)}
+                  />
+                </label>
+                <p className="muted small">{t("instances.exportModpackHint")}</p>
               </div>
             )}
 
