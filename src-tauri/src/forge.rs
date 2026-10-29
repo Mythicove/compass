@@ -299,14 +299,28 @@ pub fn extract_data_entries(
     jar: &Path,
     extracted: &Path,
 ) -> Result<HashMap<String, PathBuf>, Error> {
+    // 先按 **installer** 分目录，再按 data 变量名分。
+    //
+    // 只按变量名分是不够的，而且这个错真发生过：NeoForge 21.4 与 Forge 1.21.4 的
+    // data 里都有一个叫 `BINPATCH` 的变量、都指向自己 jar 里的 `/data/client.lzma`。
+    // 共用一个数据目录时（真实启动器就是一个目录装多个 loader），后装的那个会看见
+    // 文件已在位而跳过解压，于是拿着**另一家的补丁包**去跑 binarypatcher，报错是
+    // `Patch expected … to have the checksum ccc190c5 but it was e16f8c1d`——
+    // 一句完全看不出"用错了 installer 的文件"的话。
+    // 在函数内部按 jar 名分子目录，调用方就没机会传错。
+    let stem = jar
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| Error::Invalid(format!("unusable installer path {}", jar.display())))?;
+    let root = extracted.join(&stem);
     let mut out = HashMap::new();
     for (name, sv) in &profile.data {
         if let DataValue::InstallerEntry(entry) = parse_data_value(sv.for_side(side))? {
-            // 落点用条目的文件名：不同 profile 的条目可能同名（client.lzma/server.lzma 不会，
-            // 但别赌），所以按 data 变量名分目录，天然不撞
+            // 落点用条目的文件名：同一 profile 里的条目也可能同名
+            // （client.lzma/server.lzma 不会，但别赌），所以再按 data 变量名分一层
             let dest =
-                extracted
-                    .join(name)
+                root.join(name)
                     .join(Path::new(&entry).file_name().ok_or_else(|| {
                         Error::Invalid(format!("unusable installer entry {entry:?}"))
                     })?);
@@ -1241,6 +1255,53 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn two_installers_sharing_a_cache_do_not_swap_their_patches() {
+        // 这条真在 CI 上炸过（三平台同错）：NeoForge 21.4 与 Forge 1.21.4 的 data 里
+        // 都有一个 `BINPATCH` 指向各自 jar 里的 `/data/client.lzma`。只按变量名分目录时，
+        // 共用数据目录的后装者会看见"文件已在位"而跳过解压，拿着另一家的补丁包去跑
+        // binarypatcher，报错是 `Patch expected … checksum ccc190c5 but it was e16f8c1d`——
+        // 一句完全看不出"用错了 installer 的文件"的话。
+        //
+        // 本地发现不了：两个 loader 各自用独立的数据目录跑，恰好绕开了共用这条路径。
+        let dir = tempfile::tempdir().unwrap();
+        let make = |name: &str, payload: &[u8]| -> PathBuf {
+            let src = dir.path().join(format!("{name}-src"));
+            std::fs::create_dir_all(src.join("data")).unwrap();
+            std::fs::write(src.join("data/client.lzma"), payload).unwrap();
+            let jar = dir.path().join(format!("{name}-installer.jar"));
+            crate::archive::zip_dir(&src, &jar, &[]).unwrap();
+            jar
+        };
+        let nf = make("neoforge-21.4.161", b"neoforge-patches");
+        let fg = make("forge-1.21.4-54.1.22", b"forge-patches");
+
+        let profile: InstallProfile = serde_json::from_str(
+            r#"{"json":"/version.json","minecraft":"1.21.4",
+                "data":{"BINPATCH":{"client":"/data/client.lzma","server":"/data/server.lzma"}}}"#,
+        )
+        .unwrap();
+
+        let cache = dir.path().join("forge-extract");
+        let a = extract_data_entries(&profile, "client", &nf, &cache).unwrap();
+        let b = extract_data_entries(&profile, "client", &fg, &cache).unwrap();
+        assert_ne!(
+            a["BINPATCH"], b["BINPATCH"],
+            "两个 installer 必须落在不同目录，否则后装的会复用前一家的补丁"
+        );
+        assert_eq!(std::fs::read(&a["BINPATCH"]).unwrap(), b"neoforge-patches");
+        assert_eq!(std::fs::read(&b["BINPATCH"]).unwrap(), b"forge-patches");
+
+        // 幂等：重装同一个 loader 不该改写已在位的文件
+        let a2 = extract_data_entries(&profile, "client", &nf, &cache).unwrap();
+        assert_eq!(a2["BINPATCH"], a["BINPATCH"]);
+        assert_eq!(
+            std::fs::read(&a2["BINPATCH"]).unwrap(),
+            b"neoforge-patches",
+            "第二次不该被另一家的内容覆盖"
+        );
     }
 
     #[test]
