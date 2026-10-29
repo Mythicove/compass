@@ -157,6 +157,7 @@ async fn installs_neoforge_for_real() {
         client_token: "0".repeat(32),
         api_url: "https://mc.example.com".into(),
         signed_in_at: 0,
+        kind: compass_lib::account::AccountKind::Yggdrasil,
     };
     let plan = compass_lib::runner::build(&compass_lib::runner::LaunchInput {
         instance: &inst,
@@ -293,6 +294,7 @@ async fn launches_neoforge_for_real() {
         client_token: "0".repeat(32),
         api_url: "https://mc.example.com".into(),
         signed_in_at: 0,
+        kind: compass_lib::account::AccountKind::Yggdrasil,
     };
     let version = compass_lib::runner::read_installed_version(&paths, &installed.id).unwrap();
     let os = OsInfo::current();

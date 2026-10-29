@@ -28,6 +28,8 @@ export interface PathsInfo {
   root: string;
   configFile: string;
   accountsFile: string;
+  /** 令牌所在的文件。**明文**（0600），所以要在 UI 上显示出来而不是藏着 */
+  secretsFile: string;
   cache: string;
   assets: string;
   libraries: string;
@@ -37,11 +39,45 @@ export interface PathsInfo {
   instances: string;
 }
 
+/** 账号类型。微软正版（device code flow）还没接：它需要一个 Azure 应用的 client ID，
+ *  那是个待定决策，所以这里不放假的取值——放了就意味着 UI 上有个点了会失败的按钮。 */
+export type AccountKind = "yggdrasil" | "offline";
+
 export interface AccountView {
   playerName: string;
   playerUuid: string;
   apiUrl: string;
   signedInAt: number;
+  kind: AccountKind;
+}
+
+/** 账号列表里的一条：**不含任何机密**。 */
+export interface AccountEntry {
+  /** 本机内唯一，也是机密存储的键。由 (kind, apiUrl, playerUuid) 派生，
+   *  所以改名不会让令牌失联，重复登录也不会产生第二条。 */
+  id: string;
+  kind: AccountKind;
+  playerName: string;
+  playerUuid: string;
+  apiUrl: string;
+  signedInAt: number;
+  lastUsedAt: number;
+}
+
+/** 机密存储的现状。UI 必须照着 `encrypted` 说话。 */
+export interface SecretStoreInfo {
+  /** 目前只有 `"file"`；接了系统钥匙串之后会是 `"keyring"` */
+  kind: string;
+  /** **false = 令牌是明文落盘的**（权限 0600，与账号列表分开存）。
+   *  不能显示成"已加密"：把混淆叫成加密，正是会让人误判风险的那类错。 */
+  encrypted: boolean;
+  path: string;
+}
+
+export interface AccountsView {
+  accounts: AccountEntry[];
+  activeId: string | null;
+  store: SecretStoreInfo;
 }
 
 export interface Player {
@@ -435,6 +471,14 @@ export const ipc = {
     invoke<AccountView>("auth_login", { playerName, password }),
   authLogout: () => invoke<void>("auth_logout"),
   authCheck: () => invoke<AccountView | null>("auth_check"),
+  /** 账号总览。`store.encrypted` 为 false 时 UI 必须明示令牌是明文落盘的。 */
+  accountsList: () => invoke<AccountsView>("accounts_list"),
+  /** 加一个离线账号并切换过去（不需要网络，也没有令牌） */
+  accountAddOffline: (playerName: string) =>
+    invoke<AccountView>("account_add_offline", { playerName }),
+  accountSetActive: (id: string) => invoke<AccountView>("account_set_active", { id }),
+  /** 删账号连同它的令牌；删的是当前账号时自动切到剩下的第一个 */
+  accountRemove: (id: string) => invoke<void>("account_remove", { id }),
 
   /** 皮肤纹理的 data: URL；无皮肤返回 null（前端用默认模型） */
   skinDataUrl: (name: string) => invoke<string | null>("mirror_skin_data_url", { name }),

@@ -344,6 +344,7 @@ mod tests {
             client_token: "ct".into(),
             api_url: "https://mc.example.com".into(),
             signed_in_at: 0,
+            kind: crate::account::AccountKind::Yggdrasil,
         }
     }
 

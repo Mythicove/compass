@@ -127,6 +127,35 @@ function Shell() {
     };
   }, [t]);
 
+  // 切页面时重读账号列表：设置页里可能切了账号、加了离线账号或删了账号，
+  // 侧栏与首页要跟着变。用 accountsList 而不是 authCheck——后者会打一次服务端校验，
+  // 每次导航都校验既慢又没必要（启动时已经校验过）。依赖里带上 checking：
+  // 启动时 authCheck 可能判定令牌失效并删掉账号，等它结束后再读一次才是准的。
+  useEffect(() => {
+    let cancelled = false;
+    void ipc
+      .accountsList()
+      .then((list) => {
+        if (cancelled) return;
+        const active = list.accounts.find((a) => a.id === list.activeId);
+        setAccount(
+          active
+            ? {
+                playerName: active.playerName,
+                playerUuid: active.playerUuid,
+                apiUrl: active.apiUrl,
+                signedInAt: active.signedInAt,
+                kind: active.kind,
+              }
+            : null,
+        );
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [view, checking]);
+
   const signIn = async (playerName: string, password: string) => {
     setError(null);
     try {

@@ -57,6 +57,12 @@ impl Paths {
         self.root.join("accounts.json")
     }
 
+    /// 令牌等机密的落点。**与账号列表分开存**：accounts.json 里只有身份与时间戳
+    /// （那是要给前端看的），令牌单独一个文件，好收紧权限、也好在退出登录时单独删干净。
+    pub fn secrets_file(&self) -> PathBuf {
+        self.root.join("secrets.json")
+    }
+
     pub fn cache(&self) -> PathBuf {
         self.root.join("cache")
     }
@@ -104,6 +110,7 @@ impl Paths {
             root: self.root.display().to_string(),
             config_file: self.config_file().display().to_string(),
             accounts_file: self.accounts_file().display().to_string(),
+            secrets_file: self.secrets_file().display().to_string(),
             cache: self.cache().display().to_string(),
             assets: self.assets().display().to_string(),
             libraries: self.libraries().display().to_string(),
@@ -121,6 +128,8 @@ pub struct PathsInfo {
     pub root: String,
     pub config_file: String,
     pub accounts_file: String,
+    /// 令牌所在。**要显示给用户**：现在它是明文文件，藏着不说等于让人以为已经加密了。
+    pub secrets_file: String,
     pub cache: String,
     pub assets: String,
     pub libraries: String,

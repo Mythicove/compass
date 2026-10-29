@@ -319,6 +319,7 @@ async fn installs_a_real_version_and_produces_a_consistent_launch_plan() {
         client_token: "0".repeat(32),
         api_url: "https://mc.example.com".into(),
         signed_in_at: 0,
+        kind: compass_lib::account::AccountKind::Yggdrasil,
     };
     let plan = compass_lib::runner::build(&compass_lib::runner::LaunchInput {
         instance: &fabric_inst,
@@ -459,6 +460,7 @@ async fn installs_a_real_version_and_produces_a_consistent_launch_plan() {
                 client_token: resp.client_token,
                 api_url: cfg.api_url.clone(),
                 signed_in_at: 0,
+                kind: compass_lib::account::AccountKind::Yggdrasil,
             }
         }
         _ => compass_lib::account::Account {
@@ -468,6 +470,7 @@ async fn installs_a_real_version_and_produces_a_consistent_launch_plan() {
             client_token: "0".repeat(32),
             api_url: cfg.api_url.clone(),
             signed_in_at: 0,
+            kind: compass_lib::account::AccountKind::Yggdrasil,
         },
     };
 

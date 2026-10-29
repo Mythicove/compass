@@ -112,5 +112,6 @@ pub fn offline_account() -> compass_lib::account::Account {
         client_token: "0".repeat(32),
         api_url: "https://mc.example.com".into(),
         signed_in_at: 0,
+        kind: compass_lib::account::AccountKind::Yggdrasil,
     }
 }

@@ -1,13 +1,21 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { errorKey, useI18n } from "../i18n";
 import { useConfig } from "../App";
-import { ipc, toIpcError, type Config, type PathsInfo } from "../lib/ipc";
+import {
+  ipc,
+  toIpcError,
+  type AccountEntry,
+  type AccountsView,
+  type Config,
+  type PathsInfo,
+} from "../lib/ipc";
 
 const PATH_FIELDS: { key: keyof PathsInfo; label: string }[] = [
   { key: "root", label: "root" },
   { key: "configFile", label: "compass.json" },
   { key: "accountsFile", label: "accounts.json" },
+  { key: "secretsFile", label: "secrets.json" },
   { key: "cache", label: "cache/" },
   { key: "assets", label: "cache/assets/" },
   { key: "libraries", label: "cache/libraries/" },
@@ -25,6 +33,50 @@ export function SettingsView() {
   const [warning, setWarning] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [accounts, setAccounts] = useState<AccountsView | null>(null);
+  const [offlineName, setOfflineName] = useState("");
+  const [accountBusy, setAccountBusy] = useState<string | null>(null);
+  const [accountError, setAccountError] = useState<string | null>(null);
+
+  const reloadAccounts = useCallback(async () => {
+    try {
+      setAccounts(await ipc.accountsList());
+    } catch {
+      setAccounts(null);
+    }
+  }, []);
+
+  /** 账号操作的统一包装：一次只允许一个在跑，失败要显示出来说而不是静默。 */
+  const accountAct = async (key: string, fn: () => Promise<void>) => {
+    if (accountBusy) return;
+    setAccountBusy(key);
+    setAccountError(null);
+    try {
+      await fn();
+      await reloadAccounts();
+    } catch (e) {
+      setAccountError(t(errorKey(toIpcError(e).code)));
+    } finally {
+      setAccountBusy(null);
+    }
+  };
+
+  const switchAccount = (id: string) =>
+    accountAct(`switch:${id}`, async () => {
+      await ipc.accountSetActive(id);
+    });
+
+  const addOffline = () =>
+    accountAct("add-offline", async () => {
+      await ipc.accountAddOffline(offlineName.trim());
+      setOfflineName("");
+    });
+
+  const removeAccount = (a: AccountEntry) =>
+    accountAct(`remove:${a.id}`, async () => {
+      if (!window.confirm(t("settings.accountRemoveConfirm", { name: a.playerName }))) return;
+      await ipc.accountRemove(a.id);
+    });
 
   useEffect(() => setForm(config), [config]);
 
@@ -35,7 +87,8 @@ export function SettingsView() {
       .takeStartupWarning()
       .then(setWarning)
       .catch(() => setWarning(null));
-  }, []);
+    void reloadAccounts();
+  }, [reloadAccounts]);
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
@@ -160,6 +213,91 @@ export function SettingsView() {
         <section className="card warn">
           <h2>{t("settings.startupWarning")}</h2>
           <p className="small">{warning}</p>
+        </section>
+      )}
+
+      {accounts && (
+        <section className="card">
+          <h2>{t("settings.accounts")}</h2>
+          <p className="muted small">
+            {accounts.store.encrypted
+              ? t("settings.accountsStoreKeyring")
+              : t("settings.accountsStorePlain", { path: accounts.store.path })}
+          </p>
+          {accountError && (
+            <p className="error small" role="alert">
+              {accountError}
+            </p>
+          )}
+          {accounts.accounts.length === 0 ? (
+            <p className="muted small">{t("settings.accountsEmpty")}</p>
+          ) : (
+            <table className="items">
+              <thead>
+                <tr>
+                  <th>{t("settings.accountColName")}</th>
+                  <th>{t("settings.accountColKind")}</th>
+                  <th>{t("settings.accountColSite")}</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {accounts.accounts.map((a) => (
+                  <tr key={a.id} className={a.id === accounts.activeId ? undefined : "off"}>
+                    <td>
+                      <span title={a.playerUuid}>{a.playerName}</span>
+                      {a.id === accounts.activeId && (
+                        <em className="muted small"> · {t("settings.accountActive")}</em>
+                      )}
+                    </td>
+                    <td className="muted small">{t(`settings.accountKind.${a.kind}`)}</td>
+                    <td className="muted small">{a.apiUrl || "—"}</td>
+                    <td>
+                      <div className="row">
+                        {a.id !== accounts.activeId && (
+                          <button
+                            type="button"
+                            className="link"
+                            disabled={accountBusy !== null}
+                            onClick={() => void switchAccount(a.id)}
+                          >
+                            {accountBusy === `switch:${a.id}` ? "…" : t("settings.accountUse")}
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          className="link"
+                          disabled={accountBusy !== null}
+                          onClick={() => void removeAccount(a)}
+                        >
+                          {accountBusy === `remove:${a.id}` ? "…" : t("settings.accountRemove")}
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          <div className="row sub">
+            <label className="field inline grow">
+              <span>{t("settings.accountOfflineName")}</span>
+              <input
+                value={offlineName}
+                maxLength={16}
+                placeholder="Steve"
+                onChange={(e) => setOfflineName(e.target.value)}
+              />
+            </label>
+            <button
+              type="button"
+              disabled={accountBusy !== null || !offlineName.trim()}
+              onClick={() => void addOffline()}
+            >
+              {accountBusy === "add-offline" ? "…" : t("settings.accountAddOffline")}
+            </button>
+          </div>
+          <p className="muted small">{t("settings.accountOfflineHint")}</p>
         </section>
       )}
 

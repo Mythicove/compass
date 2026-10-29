@@ -10,7 +10,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::Notify;
 
-use crate::account::{self, Account, AccountView, now_unix};
+use crate::account::{self, Account, AccountView, AccountsView, now_unix};
 use crate::api::{File as HoardFile, Project, SearchResponse, Version, png_data_url};
 use crate::archive::ZipSummary;
 use crate::config::{self, Config};
@@ -86,6 +86,7 @@ pub async fn auth_login(
         client_token: resp.client_token,
         api_url,
         signed_in_at: now_unix(),
+        kind: account::AccountKind::Yggdrasil,
     };
     account::save(&state.paths, &account)?;
     let view = account.view();
@@ -117,6 +118,11 @@ pub async fn auth_check(state: State<'_, Arc<AppState>>) -> Result<Option<Accoun
     let Some(a) = current else {
         return Ok(None);
     };
+    // 离线账号没有令牌也没有站点可校验：拿空 api_url 去 validate 必然失败，
+    // 而下面的分支会把"401/403"当成令牌失效并清掉账号——离线账号会被静默删除
+    if a.kind == account::AccountKind::Offline {
+        return Ok(Some(a.view()));
+    }
     match state
         .api
         .validate(&a.api_url, &a.access_token, &a.client_token)
@@ -132,6 +138,68 @@ pub async fn auth_check(state: State<'_, Arc<AppState>>) -> Result<Option<Accoun
         }
         Err(_) => Ok(Some(a.view())),
     }
+}
+
+/// 账号总览：列表 + 当前选中的 id + 机密存储的现状。
+///
+/// `store.encrypted` 目前是 false（令牌明文落在 0600 的文件里，只是与账号列表分开存）。
+/// UI 必须照着说——把"分开存 + 收紧权限"讲成"已加密"，正是这个项目反复吃亏的那类错。
+#[tauri::command]
+pub async fn accounts_list(state: State<'_, Arc<AppState>>) -> Result<AccountsView, Error> {
+    Ok(account::list_view(&state.paths))
+}
+
+/// 加一个离线账号并切换过去。离线不需要网络，也不需要令牌。
+#[tauri::command]
+pub async fn account_add_offline(
+    state: State<'_, Arc<AppState>>,
+    player_name: String,
+) -> Result<AccountView, Error> {
+    let paths = state.paths.clone();
+    let entry = tokio::task::spawn_blocking(move || account::add_offline(&paths, &player_name))
+        .await
+        .map_err(join_err)??;
+    let view = sync_active(&state).await?;
+    let _ = entry;
+    Ok(view.expect("just-added offline account must be active"))
+}
+
+/// 切换当前账号。切换之后启动用的就是它，所以内存里的缓存要一起换。
+#[tauri::command]
+pub async fn account_set_active(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+) -> Result<AccountView, Error> {
+    let paths = state.paths.clone();
+    tokio::task::spawn_blocking(move || account::set_active(&paths, &id).map(|_| ()))
+        .await
+        .map_err(join_err)??;
+    sync_active(&state)
+        .await?
+        .ok_or_else(|| Error::Config("account was set active but cannot be loaded".into()))
+}
+
+/// 删除一个账号，连同它的令牌。删的是当前账号时自动切到剩下的第一个。
+#[tauri::command]
+pub async fn account_remove(state: State<'_, Arc<AppState>>, id: String) -> Result<(), Error> {
+    let paths = state.paths.clone();
+    tokio::task::spawn_blocking(move || account::remove(&paths, &id))
+        .await
+        .map_err(join_err)??;
+    // 删的可能正是当前账号：缓存必须重新从磁盘取，否则启动会用一个已删除的身份
+    *state.account.write().await = account::active(&state.paths);
+    Ok(())
+}
+
+/// 从磁盘重读当前账号并同步内存缓存，返回它的视图。
+///
+/// 每个改动账号的命令都要走这里：`state.account` 是启动时读进来的缓存，
+/// 不同步的话会出现"UI 显示切过去了、启动用的还是原来那个"。
+async fn sync_active(state: &State<'_, Arc<AppState>>) -> Result<Option<AccountView>, Error> {
+    let account = account::active(&state.paths);
+    let view = account.as_ref().map(|a| a.view());
+    *state.account.write().await = account;
+    Ok(view)
 }
 
 /// 皮肤纹理，转成 `data:` URL 交给 skinview3d。
